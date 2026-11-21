@@ -28,10 +28,24 @@ mkdir -p tools/bin
   curl -sLo tools/bin/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.1/APKEditor-1.4.1.jar
 export APKEDITOR="$PWD/tools/bin/APKEditor.jar"
 
-# Il2CppDumper
+# Il2CppDumper — net6 build (v6.7.40 does not know metadata v31, and the plain
+# zip asset does not exist; the net6 asset runs under the dotnet runtime).
+command -v dotnet >/dev/null || sudo apt-get install -y -qq dotnet-runtime-6.0
 [ -f tools/bin/Il2CppDumper.zip ] || \
-  curl -sLo tools/bin/Il2CppDumper.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-v6.7.40.zip
+  curl -sLo tools/bin/Il2CppDumper.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip
 mkdir -p tools/bin/il2cppdumper && unzip -qo tools/bin/Il2CppDumper.zip -d tools/bin/il2cppdumper
+
+# Launcher: the dumper ends with a "press any key" read that throws without a
+# console, so treat a finished dump as success.
+cat > tools/bin/il2cppdumper/Il2CppDumper <<'LAUNCH'
+#!/usr/bin/env bash
+set -uo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT="${3:-}"
+dotnet "$DIR/Il2CppDumper.dll" "$@" < /dev/null
+[ -n "$OUT" ] && [ -f "$OUT/dump.cs" ]
+LAUNCH
+chmod +x tools/bin/il2cppdumper/Il2CppDumper
 
 # deps cho hooks
 [ -d node_modules ] || npm install --silent frida-il2cpp-bridge frida-compile typescript
