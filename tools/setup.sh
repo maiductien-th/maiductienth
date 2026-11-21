@@ -35,15 +35,19 @@ command -v dotnet >/dev/null || sudo apt-get install -y -qq dotnet-runtime-6.0
   curl -sLo tools/bin/Il2CppDumper.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-v6.7.46.zip
 mkdir -p tools/bin/il2cppdumper && unzip -qo tools/bin/Il2CppDumper.zip -d tools/bin/il2cppdumper
 
-# Launcher: the dumper ends with a "press any key" read that throws without a
-# console, so treat a finished dump as success.
+# The dumper ends with Console.ReadKey when RequireAnyKey is true, which aborts
+# (exit 134) without an interactive console. Turn it off so it exits cleanly.
+python3 - <<'PY'
+import json
+p = "tools/bin/il2cppdumper/config.json"
+c = json.load(open(p, encoding="utf-8-sig"))
+c["RequireAnyKey"] = False
+json.dump(c, open(p, "w"), indent=2)
+PY
 cat > tools/bin/il2cppdumper/Il2CppDumper <<'LAUNCH'
 #!/usr/bin/env bash
-set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="${3:-}"
-dotnet "$DIR/Il2CppDumper.dll" "$@" < /dev/null
-[ -n "$OUT" ] && [ -f "$OUT/dump.cs" ]
+exec dotnet "$DIR/Il2CppDumper.dll" "$@"
 LAUNCH
 chmod +x tools/bin/il2cppdumper/Il2CppDumper
 
