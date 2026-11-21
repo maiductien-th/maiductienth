@@ -47,7 +47,10 @@ PY
 cat > tools/bin/il2cppdumper/Il2CppDumper <<'LAUNCH'
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec dotnet "$DIR/Il2CppDumper.dll" "$@"
+# Il2CppDumper catches its own init/dump errors and still exits 0, so also
+# require dump.cs in the output dir.
+dotnet "$DIR/Il2CppDumper.dll" "$@" || exit
+[ -f "${3:-.}/dump.cs" ] || { echo "Il2CppDumper: no dump.cs in ${3:-.}" >&2; exit 1; }
 LAUNCH
 chmod +x tools/bin/il2cppdumper/Il2CppDumper
 
