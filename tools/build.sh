@@ -20,7 +20,7 @@ echo "[4/8] unzip Swordash_2.3.1.apks -> in/extract"
 mkdir -p in/extract && unzip -qo in/Swordash_2.3.1.apks -d in/extract
 
 echo "[5/8] java -jar \$APKEDITOR m -i in/extract -o work/base.apk"
-mkdir -p work
+mkdir -p work && rm -f work/base.apk
 java -jar "$APKEDITOR" m -i in/extract -o work/base.apk
 
 echo "[6/8] unzip libil2cpp.so + global-metadata.dat -> in/apk/"
