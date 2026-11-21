@@ -1,0 +1,13 @@
+{
+  "interaction": {
+    "type": "script",
+    "path": "libgadget.js",
+    "on_change": "reload"
+  },
+  "runtime": {
+    "log": {
+      "level": "info",
+      "path": "logcat"
+    }
+  }
+}
