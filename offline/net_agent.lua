@@ -709,7 +709,7 @@ local function stageDrop(cfg)
     -- Some valid equipment rows have no item row (e.g. Survivor_Boots); the
     -- client cannot show those, so only drop pieces with an ItemConfig.
     if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1
-        and rawget(items, r.name) ~= nil then
+        and items[r.name] ~= nil then
       pool[#pool + 1] = r.name
     end
   end
