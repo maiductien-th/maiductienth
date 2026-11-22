@@ -86,6 +86,25 @@ local RESPONSES = {
   ["BASE.CHECK_SERVER_CONFIG"] = function(data)
     return { ret_code = protoCode("SUCCESS", 1), result = {} }
   end,
+  -- APPLY_INT response { result 0 : integer } / APPLY_STR { result 0 : string }.
+  -- login_mgr reads only ret_code and result; these keys are registration
+  -- bookkeeping (reg_pkv / regt) with no local meaning.
+  ["BASE.APPLY_INT"] = function(data)
+    return { ret_code = protoCode("SUCCESS", 1), result = 0 }
+  end,
+  ["BASE.APPLY_STR"] = function(data)
+    return { ret_code = protoCode("SUCCESS", 1), result = "" }
+  end,
+  -- query_data passes res.data through str2lua, so data must be a Lua table
+  -- literal string. Empty table = "nothing available offline", which each
+  -- caller already handles (it is also what an empty server pool returns).
+  ["QUERY.ACHIEVEMENT"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  ["QUERY.SYNC_ACTIVITY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  ["QUERY.LOTTERY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  ["QUERY.DYNAMIC_SHOP"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  ["QUERY.EQUIP_DYNAMIC_POOL"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  -- query_data iterates res.result as a list of invitee records.
+  ["QUERY.INVITEE"] = function() return { ret_code = protoCode("SUCCESS", 1), result = {} } end,
   -- SERVER_PATCH response { version, patch, config_version, configs }:
   -- echo the client's current versions, i.e. "nothing to patch".
   ["BASE.SERVER_PATCH"] = function(data)
