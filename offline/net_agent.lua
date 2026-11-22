@@ -741,6 +741,31 @@ local function signRow(tst)
   local ok, row = pcall(function() return _ENV.ConfigMgr:GetDailySignConfig(week, day) end)
   return ok and row or nil
 end
+local function getBits(t, index, bits)
+  local per = 32 // bits
+  local v = tonumber(t[index // per + 1]) or 0
+  return (v >> ((index % per) * bits)) & ((1 << bits) - 1)
+end
+-- energy_module: ENERGY.e is the count, ENERGY.tst the server time the
+-- regeneration timer started (0 when full); one point per
+-- GetEnergyAutoIncreaseTime() seconds up to GetMaxEnergy().
+local function energyParams()
+  local maxE, step = 20, 720
+  pcall(function() maxE = tonumber(_ENV.EnergyModule:GetMaxEnergy()) or maxE end)
+  pcall(function() step = tonumber(_ENV.EnergyModule:GetEnergyAutoIncreaseTime()) or step end)
+  return maxE, math.max(1, math.floor(step))
+end
+local function regenEnergy(en)
+  local maxE, step = energyParams()
+  local e, tst, now = tonumber(en.e) or 0, tonumber(en.tst) or 0, os.time()
+  if e >= maxE then en.tst = 0; return end
+  if tst <= 0 then en.tst = now; return end
+  local n = (now - tst) // step
+  if n <= 0 then return end
+  e = math.min(maxE, e + n)
+  en.e = e
+  en.tst = e >= maxE and 0 or tst + n * step
+end
 local function today()
   local ok, v = pcall(function() return _ENV.GetDateNumber() end)
   if ok and tonumber(v) then return tonumber(v) end
@@ -931,10 +956,23 @@ local RESPONSES = {
     st.rid = _ENV.ConfigMgr:GetRoomId(stage, 1) or ""
     st.room = 1
     st.time = 0
+    local sync = { BATTLE = st }
+    local scfg = _ENV.ConfigMgr:GetStageConfig(stage)
+    for _, c in ipairs(rewardEntries(seq(type(scfg) == "table" and scfg.cost))) do
+      if c.id == "energy" then
+        local en = moduleState("ENERGY")
+        regenEnergy(en)
+        local e = tonumber(en.e) or 0
+        if e < c.count then return failRes("BATTLE.START " .. stage .. " needs energy " .. c.count) end
+        en.e = e - c.count
+        local maxE = energyParams()
+        if en.e < maxE and (tonumber(en.tst) or 0) <= 0 then en.tst = os.time() end
+        sync.ENERGY = en
+        print("[OFFLINE] BATTLE.START " .. stage .. " energy " .. e .. " -> " .. en.e)
+      end
+    end
     NetAgent.battle = st
-    pcall(function()
-    end)
-    return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
+    return { ret_code = protoCode("SUCCESS", 1) }, sync
   end,
   -- BATTLE.ENTER_ROOM (battle_module.lua:238-272) sends stage_id, the
   -- 1-based room_index it is entering, the elapsed time and choose_tco; it
@@ -1082,6 +1120,54 @@ local RESPONSES = {
     shop.tph[id] = (tonumber(shop.tph[id]) or 0) + count
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] SHOP.PURCHASE " .. id .. " x" .. count .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  -- energy_module.CheckIncrease asks once the next point is due.
+  ["ENERGY.INCREASE"] = function()
+    local en = moduleState("ENERGY")
+    regenEnergy(en)
+    return okRes(), { ENERGY = en }
+  end,
+  -- purchase_module.ECO_PURCHASE sends {sku_id, ad_sig} for the free and
+  -- "video" packs. Limits live in PURCHASE.lpc[period] = {i = period
+  -- number from the global daily()/weekly()/monthly(), c = 4-bit counters
+  -- at conditionLimit's index}; pcr[sku] counts purchases.
+  ["PURCHASE.ECO_PURCHASE"] = function(data)
+    data = tbl(data)
+    local sku = tostring(data.sku_id or "")
+    local cfg = _ENV.ConfigMgr:GetSKUConfig(sku)
+    if type(cfg) ~= "table" then return failRes("PURCHASE.ECO_PURCHASE unknown sku " .. sku) end
+    if cfg.model ~= "video" and cfg.model ~= "free" then
+      return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " model " .. tostring(cfg.model) .. " needs real billing")
+    end
+    local entries = rewardEntries(seq(cfg.itemList))
+    local grantable, missing = rewardsGrantable(entries)
+    if not grantable then
+      return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " reward not supported offline: " .. tostring(missing))
+    end
+    local pur = moduleState("Purchase")
+    local cl = cfg.conditionLimit
+    if type(cl) == "table" then
+      local period, index, limit = cfgAt(cl, 1), tonumber(cfgAt(cl, 2)), tonumber(cfgAt(cl, 3))
+      local fn = type(period) == "string" and _ENV[period]
+      if type(fn) ~= "function" or not index or not limit then
+        return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " bad conditionLimit " .. ser(cl))
+      end
+      local pnum = fn()
+      pur.lpc = tbl(pur.lpc)
+      local rec = tbl(pur.lpc[period])
+      if rec.i ~= pnum then rec = { i = pnum, c = {} } end
+      rec.c = tbl(rec.c)
+      local used = getBits(rec.c, index, 4)
+      if used >= limit then return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " limit reached") end
+      setBits(rec.c, index, 4, used + 1)
+      pur.lpc[period] = rec
+    end
+    pur.pcr = tbl(pur.pcr)
+    pur.pcr[sku] = (tonumber(pur.pcr[sku]) or 0) + 1
+    local sync = { Purchase = pur }
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] PURCHASE.ECO_PURCHASE " .. sku .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
   end,
   -- shop_module.RefreshShop sends {type, ad_sig}; tsl[type].c counts refreshes.
@@ -1364,6 +1450,22 @@ local RESPONSES = {
   ["GUIDE.SET_GUIDE_STEP_LIST"] = function(data)
     data = type(data) == "table" and data or {}
     return { ret_code = protoCode("SUCCESS", 1) }, { GUIDE = setGuideFlags(data.step_list) }
+  end,
+  -- Sent by the C# battle UI through SendRequest4CS: REFRESH_TCO {method,
+  -- arg} rerolls the skill choice (the "Ad" refresh button), REVIVE and
+  -- FREE_REVIVE bring the hero back. The battle rolls and revives locally;
+  -- the server only acknowledges, and offline there is no ad to watch.
+  ["BATTLE.REFRESH_TCO"] = function(data)
+    print("[OFFLINE] BATTLE.REFRESH_TCO " .. ser(data))
+    return okRes()
+  end,
+  ["BATTLE.REVIVE"] = function(data)
+    print("[OFFLINE] BATTLE.REVIVE " .. ser(data))
+    return okRes()
+  end,
+  ["BATTLE.FREE_REVIVE"] = function(data)
+    print("[OFFLINE] BATTLE.FREE_REVIVE " .. ser(data))
+    return okRes()
   end,
   ["BATTLE.CHOOSE_TCO"] = function(data)
     return { ret_code = protoCode("SUCCESS", 1), count = 1 }
