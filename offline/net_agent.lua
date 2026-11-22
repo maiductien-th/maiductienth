@@ -218,6 +218,42 @@ end
 -- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
 -- before the request callback runs (stock net_agent.lua:656).
 
+-- remote_module_base.updateModuleData merges a sync into the client's data:
+-- {["_"] = t} replaces a table, "*" removes a key, anything else is merged.
+-- Replacing a whole map such as EQUIP.el makes every entry look new to the
+-- ".el" change handler (old value nil), which fires EQUIP.New per item and
+-- duplicates the bag list. Send only the entries that changed against what
+-- the client already holds, replacing each changed entry as a unit.
+local function syncDelta(ix, prevIx)
+  local out = {}
+  for k, v in pairs(ix) do
+    local old = type(prevIx) == "table" and prevIx[k] or nil
+    if type(v) ~= "table" then
+      out[k] = v
+    elseif type(old) ~= "table" then
+      out[k] = { ["_"] = v }
+    else
+      local d, changed = {}, false
+      for sk, nv in pairs(v) do
+        if not same(old[sk], nv) then
+          d[sk] = type(nv) == "table" and { ["_"] = nv } or nv
+          changed = true
+        end
+      end
+      for sk in pairs(old) do
+        if v[sk] == nil then d[sk] = "*"; changed = true end
+      end
+      if changed then out[k] = d end
+    end
+  end
+  if type(prevIx) == "table" then
+    for k in pairs(prevIx) do
+      if ix[k] == nil then out[k] = "*" end
+    end
+  end
+  return out
+end
+
 local function fireSync(agent, partials)
   if type(partials) ~= "table" then return end
   local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
@@ -225,10 +261,12 @@ local function fireSync(agent, partials)
   for i, m in ipairs(md.SYNC) do
     local part = partials[m.name]
     if part ~= nil then
+      local prev = NetAgent.state and NetAgent.state[m.name]
       if NetAgent.state then NetAgent.state[m.name] = deepcopy(part) end
       local mod = mgr and mgr:GetModuleByIndex(i)
       local en = mod and mod.key_enum
       local ix = encode(part, en)
+      local prevIx = type(prev) == "table" and encode(prev, en) or nil
       if ix == nil and type(m.data) == "table" then
         -- Keys the module never declared (e.g. GUIDE.st) have no wire index;
         -- they stay in the saved state and are resent with role_data on login.
@@ -248,11 +286,7 @@ local function fireSync(agent, partials)
         for k in pairs(part) do ks[#ks + 1] = tostring(k) end
         print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped keys=" .. table.concat(ks, ","))
       else
-        if m.name ~= "ECO" then
-          for k, v in pairs(ix) do
-            if type(v) == "table" then ix[k] = { ["_"] = v } end
-          end
-        end
+        if m.name ~= "ECO" then ix = syncDelta(ix, prevIx) end
         out[i] = ix; n = n + 1
       end
     end
