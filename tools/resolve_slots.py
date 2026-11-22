@@ -55,15 +55,29 @@ def dis(start,end):
             inner=i.op_str[i.op_str.index('[')+1:i.op_str.index(']')]
             parts=[x.strip() for x in inner.split(',')]
             base=parts[0]
-            imm=int(parts[1].lstrip('#'),16) if len(parts)>1 else 0
-            if pages.get(base) is not None:
+            # Only immediate offsets form a resolvable slot. A register-indexed
+            # load (ldr x0, [x1, x2]) has no static address; skip it rather than
+            # letting int() raise and abort the rest of the disassembly.
+            imm=None
+            if len(parts)==1:
+                imm=0
+            elif parts[1].startswith('#'):
+                try: imm=int(parts[1][1:],16)
+                except ValueError: imm=None
+            if imm is not None and pages.get(base) is not None:
                 slot=pages[base]+imm
                 lb=label(slot)
                 if lb: s+=f'   ; [0x{slot:x}] = {lb}'
         elif i.mnemonic=='bl':
-            t=int(i.op_str.strip().lstrip('#'),16)
+            try: t=int(i.op_str.strip().lstrip('#'),16)
+            except ValueError: t=None
             if t in MET: s+=f'   ; -> {MET[t]}'
+            # AAPCS64: a call clobbers the caller-saved registers, so any page
+            # tracked in x0-x18 is stale afterwards.
+            for n in range(19): pages.pop(f'x{n}', None)
+        # A write to wN invalidates the page tracked in xN: same register.
         for w in written:
-            if w in pages: pages[w]=None
+            xw = 'x'+w[1:] if w[:1]=='w' and w[1:].isdigit() else w
+            pages.pop(xw, None)
         print(s)
 dis(int(sys.argv[1],16),int(sys.argv[2],16))
