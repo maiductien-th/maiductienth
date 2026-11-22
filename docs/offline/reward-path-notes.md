@@ -24,3 +24,9 @@ Sources: decompiled TextAssets from this build (`battle_module`, `economic_modul
 ## Room drops
 - `BattleModule:GetDropItemInfoForCS(room_id)` reads `BATTLE.data[room_id]`: `tag -> list of {index, {item_id = count | drop_equip = {params...}}}`; C# `LoadDropItemInfoFromLua(roomId)` consumes it.
 - Room config `drop_tag_list` (e.g. `m2_1 = {normal: 5}`), `drop_group` maps `stage + tag -> dropPool, probability`.
+
+## Still to trace (implementation order)
+1. `AIM.CLAIM_REWARD {index}`: set `AIM.ca`/`cr` bit, add `box1_1` to `ECO.t`, return `{ret_code=1, reward={{id="box1_1",count=1}}}`.
+2. `ITEM.USE {item_id,item_index,use_count}`: remove the `ECO.t` entry, grant the `realitem.UseReward` list (Economic into `ECO.d`, `gift_equip` into `EQUIP.el` with a new `euid`, boxes into `ECO.t`).
+3. The request behind the guide's `EQUIP.EQUIP` event (proto `SET_EQUIP {euid, ...}` sits near the GUIDE section of `proto_def`).
+4. Verify `EQUIP.el` entry encoding round-trips through `encode(..., key_enum)`; log `EquipModule:GetEquipList()` after sync.
