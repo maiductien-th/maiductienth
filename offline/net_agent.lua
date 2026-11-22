@@ -1299,8 +1299,34 @@ local function offlineResponse(group, name, data)
   return { ret_code = protoCode("OFFLINE", -1) }, false
 end
 
+-- custom_data_module.lua:87-113: Update writes PlayerPrefs, which a
+-- force-stop can lose, and only sends BASE.CUSTOM_UPDATE after a debounce
+-- timer. Equip slots (equip_mgr SavePlan -> "equip_plan_%d") live there, so
+-- mirror each write into the saved profile at once.
+local function patchCustomData()
+  local cdm = _ENV.CustomDataModule
+  if type(cdm) ~= "table" or cdm.__offline_mirror or type(cdm.Update) ~= "function" then return end
+  local orig = cdm.Update
+  cdm.Update = function(self, key, value, ...)
+    local r = orig(self, key, value, ...)
+    local st = NetAgent.state
+    local cd = type(self) == "table" and type(self.custom_data) == "table" and self.custom_data
+    if type(st) == "table" and cd and key ~= nil then
+      local c = type(st.CUSTOM) == "table" and st.CUSTOM or {}
+      c.d = type(c.d) == "table" and c.d or {}
+      c.d[key] = type(cd.d) == "table" and cd.d[key] or nil
+      c.lut = tonumber(cd.lut) or os.time()
+      st.CUSTOM = c
+      saveState()
+    end
+    return r
+  end
+  cdm.__offline_mirror = true
+end
+
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
+  patchCustomData()
   local res, _, sync = offlineResponse(group, name, data)
   local agent = self
   -- the caller publishes SERVER_RESPONSE from this callback and only then
