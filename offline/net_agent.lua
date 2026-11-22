@@ -194,34 +194,26 @@ local RESPONSES = {
 
   -- BATTLE.START (stage_id, stage_level, equips, params). The callback
   -- (battle_module.lua:405-409) reads BATTLE data "stage" and "rid", and the
-  -- battle scene then resolves the stage and its rooms from them, so the
-  -- server's answer is a sync of BATTLE {stage, rid, room, time}; defaults
-  -- for these are "", "", 0, 0 in ModuleDef.SYNC.
+  -- battle scene resolves rid as a RoomConfig id (RoomMgr.LoadRoom logs
+  -- "No config id: RoomConfig <rid>" otherwise). The server's answer is a
+  -- BATTLE sync: stage, the first room of the stage's roomList
+  -- (ConfigMgr:GetRoomId(stage, 1)), room = rooms entered so far, time.
   ["BATTLE.START"] = function(data)
     data = type(data) == "table" and data or {}
-    pcall(function()
-      local cfg = _ENV.ConfigMgr:GetStageConfig(data.stage_id)
-      print("[OFFLINE] stagecfg type=" .. type(cfg))
-      if type(cfg) == "table" then
-        for k, v in pairs(cfg) do
-          local sv = tostring(v)
-          if type(v) == "table" then
-            local p = {}
-            for k2, v2 in pairs(v) do p[#p + 1] = tostring(k2) .. "=" .. tostring(v2); if #p > 12 then break end end
-            sv = "{" .. table.concat(p, ",") .. "}"
-          end
-          print("[OFFLINE] stagecfg." .. tostring(k) .. " = " .. sv)
-        end
-      end
-    end)
-    NetAgent.run_counter = (NetAgent.run_counter or 0) + 1
+    local stage = tostring(data.stage_id or "")
     return { ret_code = protoCode("SUCCESS", 1) }, {
-      BATTLE = {
-        stage = tostring(data.stage_id or ""),
-        rid   = "offline-" .. NetAgent.run_counter,
-        room  = 0,
-        time  = 0,
-      },
+      BATTLE = { stage = stage, rid = _ENV.ConfigMgr:GetRoomId(stage, 1) or "", room = 1, time = 0 },
+    }
+  end,
+  -- BATTLE.ENTER_ROOM (battle_module.lua:238-272) sends stage_id, the
+  -- 1-based room_index it is entering, and the elapsed time; it only sends
+  -- when room_index > BATTLE.room and its callback reads BATTLE "rid".
+  ["BATTLE.ENTER_ROOM"] = function(data)
+    data = type(data) == "table" and data or {}
+    local stage = tostring(data.stage_id or "")
+    local index = tonumber(data.room_index) or 1
+    return { ret_code = protoCode("SUCCESS", 1) }, {
+      BATTLE = { stage = stage, rid = _ENV.ConfigMgr:GetRoomId(stage, index) or "", room = index, time = tonumber(data.time) or 0 },
     }
   end,
 
