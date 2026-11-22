@@ -247,6 +247,18 @@ local function addChosenTco(st, list)
   end
 end
 
+local function setGuideFlags(steps)
+  local g = moduleState("GUIDE")
+  local gf = math.floor(tonumber(g.gf) or 0)
+  for _, step in ipairs(type(steps) == "table" and steps or {}) do
+    local idx = tonumber(_ENV.ConfigMgr:GetFlagIndex(step))
+    if idx and idx >= 1 then gf = gf | (1 << (math.floor(idx) - 1)) end
+    print("[OFFLINE] guide step " .. tostring(step) .. " flag=" .. tostring(idx))
+  end
+  g.gf = gf
+  return g
+end
+
 local function protoCode(name, fallback)
   local gd = _ENV.GameDef
   if type(gd) == "table" and type(gd.PROTO_CODE) == "table" and gd.PROTO_CODE[name] ~= nil then
@@ -373,6 +385,18 @@ local RESPONSES = {
       end
     end
     return { ret_code = protoCode("SUCCESS", 1), extra_reward = {}, star_reward = {} }, sync
+  end,
+  -- GUIDE "gf" is a bit set: guide_module.GetFlag (lua:14-21) tests
+  -- gf & (1 << (ConfigMgr:GetFlagIndex(step) - 1)). STEP_FINISH sends
+  -- {step}; SET_GUIDE_STEP_LIST sends {step_list}. Their callbacks only
+  -- read ret_code and an optional reward, and no reward is granted offline.
+  ["GUIDE.STEP_FINISH"] = function(data)
+    data = type(data) == "table" and data or {}
+    return { ret_code = protoCode("SUCCESS", 1) }, { GUIDE = setGuideFlags({ data.step }) }
+  end,
+  ["GUIDE.SET_GUIDE_STEP_LIST"] = function(data)
+    data = type(data) == "table" and data or {}
+    return { ret_code = protoCode("SUCCESS", 1) }, { GUIDE = setGuideFlags(data.step_list) }
   end,
   ["BATTLE.CHOOSE_TCO"] = function(data)
     return { ret_code = protoCode("SUCCESS", 1), count = 1 }
