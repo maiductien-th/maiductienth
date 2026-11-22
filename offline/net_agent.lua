@@ -571,6 +571,34 @@ local RESPONSES = {
   -- data "vi" (server battle info) and its "ctl" = {[tco key] = count
   -- already reported}; the client reports new picks as
   -- choose_tco = {{key=, value=}, ...} on ENTER_ROOM and OVER.
+  -- hero_module.lua LevelUp: client checks ECO via GetLevelupCost
+  -- (ConfigMgr:GetHeroLevelupCost -> cost_coin, cost_material of
+  -- ITEM_ID.COIN / ITEM_ID.HERO_LEVELUP_MATERIAL), then sends {id, level}
+  -- and only reads ret_code.
+  ["HERO.LEVELUP"] = function(data)
+    data = type(data) == "table" and data or {}
+    local id, level = tostring(data.id or ""), math.floor(tonumber(data.level) or 0)
+    local hero = moduleState("HERO")
+    hero.hl = type(hero.hl) == "table" and hero.hl or {}
+    local cur = type(hero.hl[id]) == "table" and (tonumber(hero.hl[id].l) or 1) or nil
+    local ok, coin, mat = pcall(function() return _ENV.ConfigMgr:GetHeroLevelupCost(id, level) end)
+    coin, mat = tonumber(coin), tonumber(mat)
+    local ids = _ENV.GameDef.ITEM_ID or {}
+    local eco = moduleState("ECO")
+    eco.d = type(eco.d) == "table" and eco.d or {}
+    local cid, mid = ids.COIN or "coin", ids.HERO_LEVELUP_MATERIAL
+    if not cur or level ~= cur + 1 or not ok or not coin or not mat or not mid
+        or (tonumber(eco.d[cid]) or 0) < coin or (tonumber(eco.d[mid]) or 0) < mat then
+      print("[OFFLINE] HERO.LEVELUP rejected id=" .. id .. " level=" .. level)
+      return { ret_code = protoCode("FAIL", 0) }
+    end
+    eco.d[cid] = eco.d[cid] - coin
+    eco.d[mid] = eco.d[mid] - mat
+    hero.hl[id].l = level
+    print("[OFFLINE] HERO.LEVELUP " .. id .. " -> " .. level .. " coin-" .. coin .. " " .. tostring(mid) .. "-" .. mat)
+    return { ret_code = protoCode("SUCCESS", 1) }, { HERO = hero, ECO = eco }
+  end,
+
   ["BATTLE.START"] = function(data)
     data = type(data) == "table" and data or {}
     local stage = tostring(data.stage_id or "")
