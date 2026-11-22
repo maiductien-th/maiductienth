@@ -49,7 +49,9 @@ function NetAgent:Reset(...) end
 function NetAgent:AddConnectingFilterProto(...) end
 function NetAgent:ClearProtoCallback(...) end
 function NetAgent:RegServerRequestHandler(...) end
-function NetAgent:RegistRequestCallback(...) end
+-- Native LuaManager registers one CSCallback; responses to SendRequest4CS
+-- are delivered to it as (session, res), as in the stock CSProtoCallback.
+function NetAgent:RegistRequestCallback(handler) self.cs_callback = handler end
 function NetAgent:sendSproto(...) end
 function NetAgent:ApplyDisconnect(...) end
 function NetAgent:OnServerDisconnect(...) end
@@ -67,6 +69,84 @@ local function autoviv(tag)
     return v
   end }
   return setmetatable({ ["\0path"] = tag }, mt)
+end
+
+local function ser(v, depth)
+  depth = depth or 0
+  local t = type(v)
+  if t == "number" or t == "boolean" then return tostring(v) end
+  if t == "string" then return string.format("%q", v) end
+  if t ~= "table" or depth > 12 then return "nil" end
+  local parts = {}
+  for k, val in pairs(v) do
+    local key
+    if type(k) == "number" then key = "[" .. tostring(k) .. "]"
+    else key = "[" .. string.format("%q", tostring(k)) .. "]" end
+    parts[#parts + 1] = key .. "=" .. ser(val, depth + 1)
+  end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+local function show(x)
+  if type(x) ~= "table" then return tostring(x) end
+  local p = {}
+  for k, v in pairs(x) do p[#p+1] = tostring(k) .. "=" .. show(v) end
+  table.sort(p); return "{" .. table.concat(p, ",") .. "}"
+end
+-- RemoteModuleBase.Init builds key_enum = Utils.genKeyIndex(init_data) and
+-- setData maps server data back with SyncIndex2Key, so the server ships
+-- module data index-keyed. Pick the Key2Index argument order that
+-- roundtrips through Index2Key instead of assuming it.
+local function same(x, y)
+  if type(x) ~= type(y) then return false end
+  if type(x) ~= "table" then return x == y end
+  for k, v in pairs(x) do if not same(v, y[k]) then return false end end
+  for k in pairs(y) do if x[k] == nil then return false end end
+  return true
+end
+local function encode(data, en)
+  local U = _ENV.Utils
+  en = en or U.genKeyIndex(data)
+  for _, order in ipairs({1, 2}) do
+    local ok, ix = pcall(function()
+      if order == 1 then return U.Key2Index(data, en) end
+      return U.Key2Index(en, data)
+    end)
+    if ok and type(ix) == "table" then
+      local ok2, back = pcall(function()
+        if order == 1 then return U.Index2Key(ix, en) end
+        return U.Index2Key(en, ix)
+      end)
+      if ok2 and same(back, data) then return ix, order end
+    end
+  end
+  return nil, 0
+end
+
+-- Server responses carry module updates in sync_list: a Lua literal
+-- {[ModuleDef.SYNC index] = data index-keyed with that module's key_enum},
+-- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
+-- before the request callback runs (stock net_agent.lua:656).
+local function fireSync(agent, partials)
+  if type(partials) ~= "table" then return end
+  local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
+  local out, n = {}, 0
+  for i, m in ipairs(md.SYNC) do
+    local part = partials[m.name]
+    if part ~= nil then
+      local mod = mgr and mgr:GetModuleByIndex(i)
+      local en = mod and mod.key_enum
+      local ix = encode(part, en)
+      if ix == nil then
+        print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped")
+      else
+        out[i] = ix; n = n + 1
+      end
+    end
+  end
+  if n == 0 then return end
+  local literal = ser(out)
+  print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
+  _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
 end
 
 local function protoCode(name, fallback)
@@ -107,6 +187,44 @@ local RESPONSES = {
   ["QUERY.INVITEE"] = function() return { ret_code = protoCode("SUCCESS", 1), result = {} } end,
   -- SERVER_PATCH response { version, patch, config_version, configs }:
   -- echo the client's current versions, i.e. "nothing to patch".
+  -- proto_def BASE.CUSTOM_UPDATE 5: response { ret_code 0 : integer }
+  ["BASE.CUSTOM_UPDATE"] = function()
+    return { ret_code = protoCode("SUCCESS", 1) }
+  end,
+
+  -- BATTLE.START (stage_id, stage_level, equips, params). The callback
+  -- (battle_module.lua:405-409) reads BATTLE data "stage" and "rid", and the
+  -- battle scene then resolves the stage and its rooms from them, so the
+  -- server's answer is a sync of BATTLE {stage, rid, room, time}; defaults
+  -- for these are "", "", 0, 0 in ModuleDef.SYNC.
+  ["BATTLE.START"] = function(data)
+    data = type(data) == "table" and data or {}
+    pcall(function()
+      local cfg = _ENV.ConfigMgr:GetStageConfig(data.stage_id)
+      print("[OFFLINE] stagecfg type=" .. type(cfg))
+      if type(cfg) == "table" then
+        for k, v in pairs(cfg) do
+          local sv = tostring(v)
+          if type(v) == "table" then
+            local p = {}
+            for k2, v2 in pairs(v) do p[#p + 1] = tostring(k2) .. "=" .. tostring(v2); if #p > 12 then break end end
+            sv = "{" .. table.concat(p, ",") .. "}"
+          end
+          print("[OFFLINE] stagecfg." .. tostring(k) .. " = " .. sv)
+        end
+      end
+    end)
+    NetAgent.run_counter = (NetAgent.run_counter or 0) + 1
+    return { ret_code = protoCode("SUCCESS", 1) }, {
+      BATTLE = {
+        stage = tostring(data.stage_id or ""),
+        rid   = "offline-" .. NetAgent.run_counter,
+        room  = 0,
+        time  = 0,
+      },
+    }
+  end,
+
   ["BASE.SERVER_PATCH"] = function(data)
     data = type(data) == "table" and data or {}
     return {
@@ -122,23 +240,50 @@ local RESPONSES = {
 local function offlineResponse(group, name, data)
   local tag = tostring(group) .. "." .. tostring(name)
   local build = RESPONSES[tag]
-  if build then return build(data), true end
+  if build then
+    local res, sync = build(data)
+    return res, true, sync
+  end
   print("[OFFLINE] UNRESOLVED " .. tag .. " -> ret_code=OFFLINE")
   return { ret_code = protoCode("OFFLINE", -1) }, false
 end
 
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
-  local res = offlineResponse(group, name, data)
+  local res, _, sync = offlineResponse(group, name, data)
+  local agent = self
   -- the caller publishes SERVER_RESPONSE from this callback and only then
   -- waits on it, so delivering inline drops the message ("Wait nil But
   -- Receive SERVER_RESPONSE"). Defer to the next tick.
-  if cb then self.pending[#self.pending + 1] = { cb = cb, res = res, tag = tostring(group) .. "." .. tostring(name) } end
+  self.pending[#self.pending + 1] = {
+    res = res, tag = tostring(group) .. "." .. tostring(name),
+    cb = function(r) fireSync(agent, sync); if cb then cb(r) end end,
+  }
   return res
 end
-function NetAgent:SendRequest4CS(group, name, ...)
+-- Mirrors stock net_agent.lua:544-553 and CSProtoCallback (508-513):
+-- the session handed back to C# is the pre-increment counter (starting at 1)
+-- and the native CSCallback reads the session as its first (integer) arg
+-- (LuaHelper.GetInt(1) fails on a table there), then the response.
+function NetAgent:SendRequest4CS(group, name, args)
   print("[OFFLINE] SendRequest4CS group=" .. tostring(group) .. " name=" .. tostring(name))
-  return (offlineResponse(group, name, ...))
+  if type(args) == "table" then
+    for k, v in pairs(args) do print("[OFFLINE]   arg " .. tostring(k) .. " = " .. tostring(v)) end
+  else print("[OFFLINE]   args " .. type(args) .. " " .. tostring(args)) end
+  local session = self.cs_session or 1
+  self.cs_session = session + 1
+  local res, _, sync = offlineResponse(group, name, args)
+  local agent = self
+  self.pending[#self.pending + 1] = {
+    tag = tostring(group) .. "." .. tostring(name) .. "#cs",
+    res = res,
+    cb = function(r)
+      fireSync(agent, sync)
+      if agent.cs_callback then agent.cs_callback(session, r)
+      else print("[OFFLINE] no cs_callback for session " .. session) end
+    end,
+  }
+  return session
 end
 
 local function dumpTable(label, t)
@@ -168,62 +313,13 @@ function NetAgent:Login(...)
   -- role_data: the client's own new-player defaults from ModuleDef.SYNC,
   -- serialized as a plain data literal (str2lua loads it in a sandbox, so it
   -- must not call functions).
-  local function ser(v, depth)
-    depth = depth or 0
-    local t = type(v)
-    if t == "number" or t == "boolean" then return tostring(v) end
-    if t == "string" then return string.format("%q", v) end
-    if t ~= "table" or depth > 12 then return "nil" end
-    local parts = {}
-    for k, val in pairs(v) do
-      local key
-      if type(k) == "number" then key = "[" .. tostring(k) .. "]"
-      else key = "[" .. string.format("%q", tostring(k)) .. "]" end
-      parts[#parts + 1] = key .. "=" .. ser(val, depth + 1)
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-  end
-  local U = _ENV.Utils
-  local function show(x)
-    if type(x) ~= "table" then return tostring(x) end
-    local p = {}
-    for k, v in pairs(x) do p[#p+1] = tostring(k) .. "=" .. show(v) end
-    table.sort(p); return "{" .. table.concat(p, ",") .. "}"
-  end
-  -- RemoteModuleBase.Init builds key_enum = Utils.genKeyIndex(init_data) and
-  -- setData maps server data back with SyncIndex2Key, so the server ships
-  -- module data index-keyed. Pick the Key2Index argument order that
-  -- roundtrips through Index2Key instead of assuming it.
-  local function same(x, y)
-    if type(x) ~= type(y) then return false end
-    if type(x) ~= "table" then return x == y end
-    for k, v in pairs(x) do if not same(v, y[k]) then return false end end
-    for k in pairs(y) do if x[k] == nil then return false end end
-    return true
-  end
-  local function encode(data)
-    local en = U.genKeyIndex(data)
-    for _, order in ipairs({1, 2}) do
-      local ok, ix = pcall(function()
-        if order == 1 then return U.Key2Index(data, en) end
-        return U.Key2Index(en, data)
-      end)
-      if ok and type(ix) == "table" then
-        local ok2, back = pcall(function()
-          if order == 1 then return U.Index2Key(ix, en) end
-          return U.Index2Key(en, ix)
-        end)
-        if ok2 and same(back, data) then return ix, order end
-      end
-    end
-    return nil, 0
-  end
   do
     local sample = {aa=1, bb={x=2}, cc="s"}
     local ix, order = encode(sample)
-    print("[OFFLINE] probe en=" .. show(U.genKeyIndex(sample)) .. " ix=" .. show(ix) .. " order=" .. order)
+    print("[OFFLINE] probe en=" .. show(_ENV.Utils.genKeyIndex(sample)) .. " ix=" .. show(ix) .. " order=" .. order)
   end
   if type(_ENV.GameDef) == "table" then dumpTable("GameDef.PROTO_CODE", _ENV.GameDef.PROTO_CODE) end
+  local U = _ENV.Utils
   local profile = {}
   local md = _ENV.ModuleDef
   if type(md) == "table" and type(md.SYNC) == "table" then
