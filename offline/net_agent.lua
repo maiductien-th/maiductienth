@@ -1034,20 +1034,31 @@ local RESPONSES = {
     shop.tsl[t].c = c + 1
     return okRes(), { SHOP = shop }
   end,
-  -- box_module.RequestOpenBox (lua:83-115): price = GetBoxConfig(box_id).price
-  -- x count (or an ad); the callback fires BOX.OPEN_RESULT with reward.
+  -- box_module.RequestOpenBox (lua:83-115): arbitrary boxes send count (one
+  -- price per draw); fixed boxes send no count, cost one price and draw
+  -- loopCount times. CD > 0 starts BOX.cd[box] (GetBoxCDReadyTime), and
+  -- box_limit_<box> caps BOX.ot[box] per day (GetBoxDailyLimitLeftTimes).
   ["SHOP.OPEN_BOX"] = function(data)
     data = tbl(data)
     local boxId = tostring(data.box_id or "")
-    local count = math.max(1, math.floor(tonumber(data.count) or 1))
     local cfg = _ENV.ConfigMgr:GetBoxConfig(boxId)
     if type(cfg) ~= "table" then return failRes("SHOP.OPEN_BOX unknown box " .. boxId) end
-    local sync = {}
+    local paidCount = math.max(1, math.floor(tonumber(data.count) or 1))
+    local count = math.max(1, math.floor(tonumber(data.count) or tonumber(cfg.loopCount) or 1))
+    local now = os.time()
+    local box = moduleState("BOX")
+    box.cd, box.ot = tbl(box.cd), tbl(box.ot)
+    if (tonumber(box.cd[boxId]) or 0) > now then return failRes("SHOP.OPEN_BOX " .. boxId .. " on cooldown") end
     local price = tbl(cfg.price)
+    local limit = tonumber(_ENV.ConfigMgr["box_limit_" .. boxId]) or 999
+    if (tonumber(box.ot[boxId]) or 0) >= limit then return failRes("SHOP.OPEN_BOX " .. boxId .. " daily limit") end
+    local sync = { BOX = box }
     if data.ad_sig == nil and price.id ~= nil and price.id ~= "video" then
-      local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * count })
+      local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * paidCount })
       if not paid then return failRes("SHOP.OPEN_BOX " .. boxId .. " short of " .. tostring(short)) end
     end
+    if (tonumber(cfg.CD) or 0) > 0 then box.cd[boxId] = now + math.floor(tonumber(cfg.CD)) end
+    box.ot[boxId] = (tonumber(box.ot[boxId]) or 0) + 1
     local adv = moduleState("ADV")
     local entries = {}
     for _ = 1, count do
