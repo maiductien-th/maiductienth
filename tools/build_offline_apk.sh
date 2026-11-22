@@ -5,8 +5,13 @@ set -euo pipefail
 APK=${1:-work/base.apk}
 LUA=${2:-offline/net_agent.lua}
 OUT=${3:-work/FINAL.apk}
-KS=${KEYSTORE:-keys/my.jks}
-BT=${BUILD_TOOLS:-$HOME/android-sdk/build-tools/34.0.0}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+KS=${KEYSTORE:-$ROOT/keys/my.jks}
+ZIPALIGN=${ZIPALIGN:-$(command -v zipalign || true)}
+APKSIGNER=${APKSIGNER:-$(command -v apksigner || true)}
+if [ -n "${BUILD_TOOLS:-}" ]; then ZIPALIGN="$BUILD_TOOLS/zipalign"; APKSIGNER="$BUILD_TOOLS/apksigner"; fi
+[ -x "$ZIPALIGN" ] || { echo "zipalign not found; set BUILD_TOOLS or ZIPALIGN" >&2; exit 1; }
+[ -x "$APKSIGNER" ] || { echo "apksigner not found; set BUILD_TOOLS or APKSIGNER" >&2; exit 1; }
 TMP=$(mktemp -d)
 
 unzip -o -q "$APK" assets/scp.ab -d "$TMP"
@@ -36,8 +41,8 @@ PY
 
 cp -f "$APK" "$OUT.tmp"
 (cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" assets/scp.ab)
-"$BT/zipalign" -f -p 4 "$OUT.tmp" "$OUT.aligned"
-"$BT/apksigner" sign --ks "$KS" --ks-pass "pass:${KS_PASS:-123456}" --out "$OUT" "$OUT.aligned"
+"$ZIPALIGN" -f -p 4 "$OUT.tmp" "$OUT.aligned"
+"$APKSIGNER" sign --ks "$KS" --ks-pass "pass:${KS_PASS:-123456}" --out "$OUT" "$OUT.aligned"
 rm -f "$OUT.tmp" "$OUT.aligned" "$OUT.aligned.idsig"
-"$BT/apksigner" verify --print-certs "$OUT" | head -3
+"$APKSIGNER" verify --print-certs "$OUT" | head -3
 rm -rf "$TMP"

@@ -63,13 +63,26 @@ Verified on a clean install with the network disabled:
 Stock behaviour for comparison: the unmodified game boots offline but dies in
 `net_agent._RequestServerRoute` -> `sproto_helper._socketConnect`.
 
+## Progress since first report
+
+Responses were delivered inline, so the client published `SERVER_RESPONSE`
+before reaching its `Wait` and the message was dropped (`Wait nil But Receive
+SERVER_RESPONSE`). They are now queued and flushed on a tick registered with
+`World:RegistUpdate`. Empty response tables also made modules index nil, so
+responses auto-vivify nested tables on demand.
+
+With that, server config completes and the client issues real requests:
+`BASE.CHECK_SERVER_CONFIG`, `QUERY.EQUIP_DYNAMIC_POOL`, `BASE.SERVER_PATCH`.
+
 ## What does not work yet
 
-The client stops at `server_config_mgr.LoadServerConfig`. `StartRequest` waits
-on a `SERVER_RESPONSE` message, and the stub returns a value instead of
-publishing that message, so the wait never completes.
+The client now fails in `module/remote/custom_data_module.lua:116` with
+`attempt to index a nil value (field 'd')`, about 130ms after the first
+request. That is the `role_data` decode path rather than a query response: the
+compressed Lua literal does not come back as a table, so `str2lua` is probably
+not what parses it.
 
-Reaching gameplay also needs `role_data`: the LOGIN response carries the whole
+Reaching gameplay needs `role_data`: the LOGIN response carries the whole
 player profile as a deflate-compressed string (`GameDef.IS_COMPRESS = 1`,
 `Compressor` over `LibDeflate`), which every client module reads. Synthesizing
 a valid profile is the remaining work. Entering a stage, saving and reopening
