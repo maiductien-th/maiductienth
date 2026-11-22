@@ -685,13 +685,12 @@ end
 -- Daily sign-in: PLAYER.tst counts signed days, lsd is the last sign date
 -- (player_module CanSign compares GetDateNumber() with lsd); day = tst % 7.
 local function signRow(tst)
-  local cfg = _ENV.ConfigMgr:GetConfig("daily_sign_in") or {}
-  local weeks = #seq(cfg)
-  if weeks == 0 then return nil end
+  -- Same week/day as player_module.GetSignInfo; config_mgr.GetDailySignConfig
+  -- falls back to week 4 once the table runs out.
   local t = math.max(1, tst)
-  local week = (math.ceil(t / 7) - 1) % weeks + 1
-  local day = (t - 1) % 7 + 1
-  return cfgAt(cfgAt(cfg, week), day)
+  local week, day = math.ceil(t / 7), (t - 1) % 7 + 1
+  local ok, row = pcall(function() return _ENV.ConfigMgr:GetDailySignConfig(week, day) end)
+  return ok and row or nil
 end
 local function today()
   local ok, v = pcall(function() return _ENV.GetDateNumber() end)
