@@ -41,8 +41,8 @@ function NetAgent:Update(...)
   self.pending = {}
   for i = 1, n do
     local item = queued[i]
-    local ok, err = pcall(item.cb, item.res)
-    if not ok then print("[OFFLINE] deferred cb error: " .. tostring(err)) end
+    local ok, err = xpcall(item.cb, debug.traceback, item.res)
+    if not ok then print("[OFFLINE] deferred cb error [" .. tostring(item.tag) .. "]: " .. tostring(err)) end
   end
 end
 function NetAgent:Reset(...) end
@@ -54,47 +54,72 @@ function NetAgent:sendSproto(...) end
 function NetAgent:ApplyDisconnect(...) end
 function NetAgent:OnServerDisconnect(...) end
 
-local function autoviv()
+-- Diagnostic only: every field the client reads that the offline response
+-- does not define is logged as MISSING so it can be given an explicit shape.
+local function autoviv(tag)
   local mt
   mt = { __index = function(t, k)
-    local v = setmetatable({}, mt)
+    local path = rawget(t, "\0path") or tag
+    local full = path .. "." .. tostring(k)
+    print("[OFFLINE] MISSING " .. full)
+    local v = setmetatable({ ["\0path"] = full }, mt)
     rawset(t, k, v)
     return v
   end }
-  return setmetatable({}, mt)
+  return setmetatable({ ["\0path"] = tag }, mt)
 end
 
-local function offlineResponse(group, name)
-  local g, n = tostring(group), tostring(name)
-  local res = autoviv()
-  if n == "CHECK_SERVER_CONFIG" or n == "REQUIRE_SERVER_CONFIG" or g == "CHECK_SERVER_CONFIG" then
-    res.check_result      = {}
-    res.config            = ""
-    res.system_mail       = {}
-    res.broadcast         = {}
-    res.skin_open_list    = {}
-    res.define            = {}
-    res.battle_pass_time  = {}
-    res.activity_chest    = {}
+local function protoCode(name, fallback)
+  local gd = _ENV.GameDef
+  if type(gd) == "table" and type(gd.PROTO_CODE) == "table" and gd.PROTO_CODE[name] ~= nil then
+    return gd.PROTO_CODE[name]
   end
-  res.ret_code = 0
-  res.result   = {}
-  res.list     = {}
-  return res
+  return fallback
+end
+
+-- Responses with a shape taken from proto_def and the caller's own request.
+-- Anything not listed gets the client's own "not connected" answer,
+-- {ret_code = PROTO_CODE.OFFLINE}, which the stock net_agent sends to every
+-- pending callback on disconnect; no fields are invented for it.
+local RESPONSES = {
+  -- CHECK_SERVER_CONFIG response { result 0 : *DictionaryStr }: no overrides.
+  ["BASE.CHECK_SERVER_CONFIG"] = function(data)
+    return { ret_code = protoCode("SUCCESS", 1), result = {} }
+  end,
+  -- SERVER_PATCH response { version, patch, config_version, configs }:
+  -- echo the client's current versions, i.e. "nothing to patch".
+  ["BASE.SERVER_PATCH"] = function(data)
+    data = type(data) == "table" and data or {}
+    return {
+      ret_code       = protoCode("SUCCESS", 1),
+      version        = data.patch_version or 0,
+      patch          = "",
+      config_version = data.patch_config_version or 0,
+      configs        = {},
+    }
+  end,
+}
+
+local function offlineResponse(group, name, data)
+  local tag = tostring(group) .. "." .. tostring(name)
+  local build = RESPONSES[tag]
+  if build then return build(data), true end
+  print("[OFFLINE] UNRESOLVED " .. tag .. " -> ret_code=OFFLINE")
+  return { ret_code = protoCode("OFFLINE", -1) }, false
 end
 
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
-  local res = offlineResponse(group, name)
+  local res = offlineResponse(group, name, data)
   -- the caller publishes SERVER_RESPONSE from this callback and only then
   -- waits on it, so delivering inline drops the message ("Wait nil But
   -- Receive SERVER_RESPONSE"). Defer to the next tick.
-  if cb then self.pending[#self.pending + 1] = { cb = cb, res = res } end
+  if cb then self.pending[#self.pending + 1] = { cb = cb, res = res, tag = tostring(group) .. "." .. tostring(name) } end
   return res
 end
 function NetAgent:SendRequest4CS(group, name, ...)
   print("[OFFLINE] SendRequest4CS group=" .. tostring(group) .. " name=" .. tostring(name))
-  return offlineResponse(group, name)
+  return (offlineResponse(group, name, ...))
 end
 
 local function dumpTable(label, t)
@@ -179,6 +204,7 @@ function NetAgent:Login(...)
     local ix, order = encode(sample)
     print("[OFFLINE] probe en=" .. show(U.genKeyIndex(sample)) .. " ix=" .. show(ix) .. " order=" .. order)
   end
+  if type(_ENV.GameDef) == "table" then dumpTable("GameDef.PROTO_CODE", _ENV.GameDef.PROTO_CODE) end
   local profile = {}
   local md = _ENV.ModuleDef
   if type(md) == "table" and type(md.SYNC) == "table" then
