@@ -248,6 +248,11 @@ local function fireSync(agent, partials)
         for k in pairs(part) do ks[#ks + 1] = tostring(k) end
         print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped keys=" .. table.concat(ks, ","))
       else
+        if m.name ~= "ECO" then
+          for k, v in pairs(ix) do
+            if type(v) == "table" then ix[k] = { ["_"] = v } end
+          end
+        end
         out[i] = ix; n = n + 1
       end
     end
