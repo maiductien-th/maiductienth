@@ -427,6 +427,7 @@ local function rewardsGrantable(entries)
     if e.id == "gift_equip" then
       if not equipTemplateId(e.args) then return false, e.args end
     elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
+        and kind ~= "PetCapacity"
         and not realIdOf(e.id) then
       return false, e.id
     end
@@ -465,6 +466,11 @@ local function grantRewards(entries, sync)
       -- equip_module.GetExtraCapacity reads EQUIP.ac.
       sync.EQUIP = sync.EQUIP or moduleState("EQUIP")
       sync.EQUIP.ac = (tonumber(sync.EQUIP.ac) or 0) + n
+      shown[#shown + 1] = { id = id, count = n }
+    elseif type(cfg) == "table" and cfg.type == "PetCapacity" then
+      -- pet_module.GetPetExtraCapacity reads PET.ac.
+      sync.PET = sync.PET or moduleState("PET")
+      sync.PET.ac = (tonumber(sync.PET.ac) or 0) + n
       shown[#shown + 1] = { id = id, count = n }
     elseif type(cfg) == "table" and cfg.type == "Economic" then
       sync.ECO = sync.ECO or moduleState("ECO")
