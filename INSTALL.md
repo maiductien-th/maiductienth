@@ -18,7 +18,7 @@
 
 Build it yourself from the repository:
 
-    tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
+    KS_PASS=<keystore password> tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
 
 `work/base.apk` is the merged original APK from `tools/build.sh`. The script
 needs `zipalign` and `apksigner` (or `BUILD_TOOLS`) and a keystore at

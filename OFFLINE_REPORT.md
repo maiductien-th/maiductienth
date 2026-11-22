@@ -9,7 +9,7 @@ process and no live request. Package `com.fattoy.swordash.android`, versionCode
 
 ## Build
 
-    tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
+    KS_PASS=<keystore password> tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
 
 Every `offline/*.lua` file replaces the TextAsset of the same name in
 `assets/scp.ab` (`net_agent`, `compressor`). The APK is signed with a local key

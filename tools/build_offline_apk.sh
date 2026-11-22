@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the offline APK: swap the Lua net layer in assets/scp.ab, re-sign.
-#   tools/build_offline_apk.sh work/base.apk offline/net_agent.lua work/FINAL.apk
+#   KS_PASS=... tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
 set -euo pipefail
 APK=${1:-work/base.apk}
 LUA_DIR=${2:-offline}
@@ -12,6 +12,8 @@ APKSIGNER=${APKSIGNER:-$(command -v apksigner || true)}
 if [ -n "${BUILD_TOOLS:-}" ]; then ZIPALIGN="$BUILD_TOOLS/zipalign"; APKSIGNER="$BUILD_TOOLS/apksigner"; fi
 [ -x "$ZIPALIGN" ] || { echo "zipalign not found; set BUILD_TOOLS or ZIPALIGN" >&2; exit 1; }
 [ -x "$APKSIGNER" ] || { echo "apksigner not found; set BUILD_TOOLS or APKSIGNER" >&2; exit 1; }
+[ -n "${KS_PASS:-}" ] || { echo "set KS_PASS to the password of $KS" >&2; exit 1; }
+python3 -c "import UnityPy" 2>/dev/null || { echo "UnityPy missing; run tools/setup.sh" >&2; exit 1; }
 TMP=$(mktemp -d)
 
 unzip -o -q "$APK" assets/scp.ab -d "$TMP"
@@ -49,7 +51,7 @@ PY
 cp -f "$APK" "$OUT.tmp"
 (cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" assets/scp.ab)
 "$ZIPALIGN" -f -p 4 "$OUT.tmp" "$OUT.aligned"
-"$APKSIGNER" sign --ks "$KS" --ks-pass "pass:${KS_PASS:-123456}" --out "$OUT" "$OUT.aligned"
+"$APKSIGNER" sign --ks "$KS" --ks-pass env:KS_PASS --out "$OUT" "$OUT.aligned"
 rm -f "$OUT.tmp" "$OUT.aligned" "$OUT.aligned.idsig"
 "$APKSIGNER" verify --print-certs "$OUT" | head -3
 rm -rf "$TMP"
