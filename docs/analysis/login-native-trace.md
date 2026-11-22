@@ -143,21 +143,25 @@ Established Lua→C# edge into the account layer:
 - `GameHelper.Post(string url, string post_data, int time_out, LuaFunction callback)` 0x17230A8 is a
   further request surface exposed to Lua.
 
-**Unresolved edge — stated, not asserted.** `LoginManager.OnLoginSuccess(IntPtr L)` 0x172CB24 and
-`OnLoginFailed(IntPtr L)` 0x172D978 have the `lua_CFunction` shape and read their arguments off the
-Lua stack (`LuaHelper.GetString(L,-3)` `bl` @0x172CBE4; `LuaHelper.GetInt(L,-2)` `bl` @0x172CBF4),
-and `script.json` carries method-pointer slots for them (0x364DBF0 and 0x364DBE8). But I could not
-establish the registration statically: a scan for inline `adrp`+`ldr` loads of those slots returns 0
-references — and returns 0 for `Lua_GameHelper.LoginAccount_s` (slot 0x364DFF0) too, which is
-certainly registered, while control slots in the same scan return 2530 and 82 references. The slots
-are therefore resolved through il2cpp's metadata-usage initialisation at runtime, so **which code
-registers `OnLoginSuccess`, and which Lua function calls it, is not determined by this trace.** It
-needs a runtime trace or the Lua bytecode. The earlier draft inferred Lua invocation from a BL-only
-scan finding no callers; absence of direct edges is not evidence of a Lua binding.
+**Callback registration — resolved (see `login-lua-trace.md` §7).** `LoginManager.OnLoginSuccess(IntPtr L)`
+0x172CB24 and `OnLoginFailed(IntPtr L)` 0x172D978 have the `lua_CFunction` shape and read their
+arguments off the Lua stack (`LuaHelper.GetString(L,-3)` `bl` @0x172CBE4; `LuaHelper.GetInt(L,-2)`
+`bl` @0x172CBF4). An earlier draft of this report called the registration statically unresolvable
+because a scan for inline `adrp`+`ldr` loads of the method-pointer slots returns 0 references. **That
+conclusion was wrong and is withdrawn.** The slots are zero in the file but carry
+`R_AARCH64_RELATIVE` relocations whose addends name the target; `tools/resolve_slots.py` resolves
+them. `LoginManager.Start` 0x17298B4 builds an `SLua.CSCallback` per method and registers it via
+`LuaManager.RegistLuaEvent(string, CSCallback)` 0x1729E28 under a Lua event name — `"LOGIN.SUCCESS"`
+(slot 0x3540850) -> `OnLoginSuccess` (method slot 0x3540810), `"LOGIN.FAILED"` and
+`"SERVER_DISCONNECT"` -> `OnLoginFailed`. The decoded Lua `login_mgr.onLoginSuccess` fires
+`"LOGIN.SUCCESS"`, so the Lua-to-native edge is the event name. Full disassembly and the six-event
+table are in `login-lua-trace.md` §7.
 
-Likewise, no native→network instruction for the *game server* (as opposed to the provider SDKs) is
-identified here. `CommonAccount.Login` reaches `LuaManager.FireEvent`, and the websocket classes
-(`WSHelper`, `WSConnection`) exist, but I did not establish a call path from the login flow to them.
+No native→network instruction for the *game server* (as opposed to the provider SDKs) is emitted
+from `libil2cpp.so` directly: `CommonAccount.Login` reaches `LuaManager.FireEvent`, and the transport
+runs through Lua. The path from the login flow to the websocket is decoded on the Lua side —
+`net_agent` -> `sproto_helper` -> `WSHelper.Connect/Send/Close` (0x19865D0 / 0x198679C / 0x1986898) —
+in `login-lua-trace.md` §4, not from a native call edge.
 
 ## Layer 3 — game entry state
 
@@ -197,13 +201,14 @@ Direct edges into `AccountMgr.GetLoginState` 0x17C34F4: one, `LoginManager.Updat
 
 ## What remains unresolved
 
-1. Which code registers `OnLoginSuccess`/`OnLoginFailed` with Lua, and which Lua function invokes
-   them — the method-pointer slots are filled by runtime metadata-usage init, not by inline code.
-2. The Lua table/function names passed to `RunGlobalTableFunction` and `FireEvent`: they load from
-   `.data` pointer slots populated at runtime, and are not in `script.json`'s string table.
-3. Any call path from the login flow to the game-server websocket (`WSHelper`/`WSConnection`).
-4. Whether the provider SDK calls perform network I/O, which is internal to those SDKs.
-5. All indirect call edges (72,550 `BLR` / 19,265 `BR` sites), so every "direct edges found" count
-   above is a lower bound.
+1. Whether the provider SDK calls (`FirebaseAuth.SignInWithCredentialAsync`, `GoogleSignIn.SignIn`,
+   the FB SDK) perform network I/O, which is internal to those SDKs and not traced here.
+2. All indirect call edges (72,550 `BLR` / 19,265 `BR` sites), so every "direct edges found" count
+   above is a lower bound; no "only caller" or "only write site" claim is made.
+3. No runtime trace was performed; every statement here is static.
 
-Resolving 1–3 requires a runtime trace or the Lua bytecode, neither of which this static pass covers.
+Items the earlier draft listed as unresolved are now resolved and moved out of this list: the
+`OnLoginSuccess`/`OnLoginFailed` registration (above, and `login-lua-trace.md` §7), the Lua
+table/function names passed to `RunGlobalTableFunction` (`login-lua-trace.md` §7c), and the
+login-flow-to-websocket path (decoded in Lua via `sproto_helper` -> `WSHelper`, `login-lua-trace.md`
+§4). All were resolved by reading `.rela.dyn` relocations and the decoded Lua, not by a runtime trace.
