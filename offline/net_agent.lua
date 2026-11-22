@@ -2,6 +2,9 @@
 print("[OFFLINE] net_agent source stub v5")
 local NetAgent = {}
 _ENV.NetAgent = NetAgent
+-- the stock net_agent loads ProtoGenerator via net.sproto_helper -> proto; battle_module needs the global
+local okPG, errPG = pcall(require, "proto_generator")
+if not okPG then print("[OFFLINE] proto_generator load failed: " .. tostring(errPG)) end
 NetAgent.SERVER_LIST = {}
 NetAgent.logined = false
 NetAgent.logining = false
@@ -236,6 +239,17 @@ local function fireSync(agent, partials)
   local literal = ser(out)
   print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
   _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
+  if partials.ECO then
+    pcall(function()
+      local em = _ENV.EconomicModule
+      local parts = {}
+      for k, v in pairs(em.economic_index2key or {}) do parts[#parts + 1] = tostring(k) .. "->" .. tostring(v) end
+      local d = em:GetDataByKey("d") or {}
+      local ds = {}
+      for k, v in pairs(d) do ds[#ds + 1] = tostring(k) .. "=" .. tostring(v) end
+      print("[OFFLINE] ECO index2key {" .. table.concat(parts, ",") .. "} d {" .. table.concat(ds, ",") .. "}")
+    end)
+  end
 end
 
 local function addChosenTco(st, list)
