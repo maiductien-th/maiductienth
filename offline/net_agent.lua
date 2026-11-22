@@ -147,13 +147,22 @@ local SAVE_PATH = "/data/data/com.fattoy.swordash.android/files/offline_profile.
 NetAgent.state = NetAgent.state or nil
 local function saveState()
   if type(NetAgent.state) ~= "table" then return end
-  local f = io.open(SAVE_PATH .. ".tmp", "w")
-  if not f then print("[OFFLINE] save: cannot open " .. SAVE_PATH); return end
-  f:write("return " .. ser(NetAgent.state))
-  f:close()
-  os.remove(SAVE_PATH)
-  local ok = os.rename(SAVE_PATH .. ".tmp", SAVE_PATH)
-  print("[OFFLINE] saved profile ok=" .. tostring(ok))
+  local tmp = SAVE_PATH .. ".tmp"
+  local f = io.open(tmp, "w")
+  if not f then print("[OFFLINE] save: cannot open " .. tmp); return end
+  local wrote, werr = f:write("return " .. ser(NetAgent.state))
+  local flushed, ferr = f:flush()
+  local closed, cerr = f:close()
+  if not (wrote and flushed and closed) then
+    os.remove(tmp)
+    print("[OFFLINE] save failed, kept previous profile: " ..
+      tostring(werr or ferr or cerr))
+    return
+  end
+  -- rename(2) replaces the old profile atomically, so it is never deleted first.
+  local ok, rerr = os.rename(tmp, SAVE_PATH)
+  print("[OFFLINE] saved profile ok=" .. tostring(ok) ..
+    (ok and "" or " " .. tostring(rerr)))
 end
 local function loadSaved()
   local f = io.open(SAVE_PATH, "r")
