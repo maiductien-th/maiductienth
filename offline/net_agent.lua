@@ -550,9 +550,14 @@ local RESPONSES = {
       return { ret_code = protoCode("FAIL", 0) }
     end
     eco.t = t
+    -- box1_1's gift_equip entries are the tutorial gear, already granted on
+    -- the first clear of sm_1 (BATTLE.OVER) so the equip guide can run.
+    local skipGear = rid == realIdOf("box1_1")
     local entries = {}
     for _ = 1, removed do
-      for _, e in ipairs(rewardEntries(rcfg.UseReward)) do entries[#entries + 1] = e end
+      for _, e in ipairs(rewardEntries(configUseReward(data.item_id) or rcfg.UseReward)) do
+        if not (skipGear and e.id == "gift_equip") then entries[#entries + 1] = e end
+      end
     end
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] ITEM.USE " .. tostring(data.item_id) .. " x" .. removed .. " reward=" .. ser(reward))
