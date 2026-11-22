@@ -347,9 +347,13 @@ end
 -- economic_module ParseItemValue; "gift_equip|n|<equipment key>" grants
 -- equipment into EQUIP.el, keyed by tostring(euid), with DataEnum
 -- "equipment" keys (base_value=1, distribution=2, attr_list=3, uuid=4,
--- link=5) and base_value = template_id << 16 | level << 8 | stars | NEW_MASK
+-- link=5) and base_value = template_id << 16 | stars << 8 | level | NEW_MASK
 -- (equip_module ParseEquipBaseValue).
-local EQUIP_NEW_MASK = 1073741824
+-- equip_module.lua:17-18 define both flags. On device, bit 31 renders the
+-- "New!" badge and bit 30 the lock (it also blocks decompose), so that is
+-- the mapping used here.
+local EQUIP_NEW_MASK = 2147483648
+local EQUIP_LOCK_MASK = 1073741824
 
 local function realIdOf(itemId)
   local cm = _ENV.ConfigMgr
@@ -1183,6 +1187,61 @@ local RESPONSES = {
     local base = math.floor(tonumber(e[1]) or 0)
     if (tonumber(data.is_new) or 0) ~= 0 then e[1] = base | EQUIP_NEW_MASK else e[1] = base & ~EQUIP_NEW_MASK end
     return okRes({ result = true }), { EQUIP = eq }
+  end,
+
+  -- equip_module.RequestSetLock (lua:1710-1731) sends {id, is_lock} and,
+  -- on result, sets or clears LOCK_MASK (bit 30) in base_value itself.
+  ["EQUIP.SET_LOCK"] = function(data)
+    data = tbl(data)
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local e = eq.el[tostring(math.floor(tonumber(data.id) or 0))]
+    if type(e) ~= "table" then return okRes({ result = false }) end
+    local base = math.floor(tonumber(e[1]) or 0)
+    if (tonumber(data.is_lock) or 0) ~= 0 then e[1] = base | EQUIP_LOCK_MASK else e[1] = base & ~EQUIP_LOCK_MASK end
+    print("[OFFLINE] EQUIP.SET_LOCK " .. ser(data) .. " " .. base .. " -> " .. e[1])
+    return okRes({ result = true }), { EQUIP = eq }
+  end,
+  -- equip_module.RequestDecompose (lua:1672-1684) sends {list = {euid, ...}}
+  -- and shows res.reward via ON_GET_ITEMS. The yield is the client's own
+  -- GetAllDecomposeResult (coin, enhance material, ascend material refunds).
+  ["EQUIP.DECOMPOSE"] = function(data)
+    data = tbl(data)
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local list = {}
+    for _, id in ipairs(tbl(data.list)) do
+      local uid = tostring(math.floor(tonumber(id) or 0))
+      local e = eq.el[uid]
+      if type(e) ~= "table" then return failRes("EQUIP.DECOMPOSE no equipment " .. uid) end
+      if (math.floor(tonumber(e[1]) or 0) & EQUIP_LOCK_MASK) ~= 0 then
+        return failRes("EQUIP.DECOMPOSE locked " .. uid)
+      end
+      list[#list + 1] = uid
+    end
+    if #list == 0 then return failRes("EQUIP.DECOMPOSE empty list") end
+    local ok, results = pcall(function() return _ENV.EquipModule:GetAllDecomposeResult(list) end)
+    if not ok or type(results) ~= "table" or #results ~= #list then
+      return failRes("EQUIP.DECOMPOSE yield unavailable " .. ser(results) .. " for " .. ser(list))
+    end
+    local total, order = {}, {}
+    for _, r in ipairs(results) do
+      for _, x in ipairs(tbl(r)) do
+        if x.id ~= nil then
+          if total[x.id] == nil then order[#order + 1] = x.id end
+          total[x.id] = (total[x.id] or 0) + (tonumber(x.count) or 0)
+        end
+      end
+    end
+    local entries = {}
+    for _, id in ipairs(order) do entries[#entries + 1] = { id = id, count = total[id] } end
+    local sync = { EQUIP = eq }
+    local grantable, bad = rewardsGrantable(entries)
+    if not grantable then return failRes("EQUIP.DECOMPOSE reward unresolved " .. tostring(bad)) end
+    for _, uid in ipairs(list) do eq.el[tostring(math.floor(tonumber(uid)))] = nil end
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] EQUIP.DECOMPOSE " .. ser(list) .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
   end,
 
   -- technology_module (lua:268-347): START_RESEARCH {id} puts
