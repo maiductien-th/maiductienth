@@ -400,6 +400,23 @@ local function configUseReward(itemId)
   return type(row) == "table" and row.UseReward or nil
 end
 
+-- True when grantRewards knows how to grant every entry; callers that
+-- charge for a reward check this first so nothing is paid for nothing.
+local function rewardsGrantable(entries)
+  local items = _ENV.ConfigMgr:GetConfig("item") or {}
+  for _, e in ipairs(entries) do
+    local cfg = items[e.id]
+    local kind = type(cfg) == "table" and cfg.type
+    if e.id == "gift_equip" then
+      if not equipTemplateId(e.args) then return false, e.args end
+    elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
+        and not realIdOf(e.id) then
+      return false, e.id
+    end
+  end
+  return true
+end
+
 local function grantRewards(entries, sync)
   local items = _ENV.ConfigMgr:GetConfig("item") or {}
   local shown = {}
@@ -422,6 +439,16 @@ local function grantRewards(entries, sync)
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
       end
+    elseif type(cfg) == "table" and cfg.type == "Energy" then
+      -- energy_module.GetEnergy reads ENERGY.e.
+      sync.ENERGY = sync.ENERGY or moduleState("ENERGY")
+      sync.ENERGY.e = (tonumber(sync.ENERGY.e) or 0) + n
+      shown[#shown + 1] = { id = id, count = n }
+    elseif type(cfg) == "table" and cfg.type == "Capacity" then
+      -- equip_module.GetExtraCapacity reads EQUIP.ac.
+      sync.EQUIP = sync.EQUIP or moduleState("EQUIP")
+      sync.EQUIP.ac = (tonumber(sync.EQUIP.ac) or 0) + n
+      shown[#shown + 1] = { id = id, count = n }
     elseif type(cfg) == "table" and cfg.type == "Economic" then
       sync.ECO = sync.ECO or moduleState("ECO")
       local eco = sync.ECO
@@ -968,6 +995,14 @@ local RESPONSES = {
     if limit > 0 and (tonumber(shop.tph[id]) or 0) + count > limit then
       return failRes("SHOP.PURCHASE daily limit " .. id)
     end
+    local entries = {}
+    for _ = 1, count do
+      for _, e in ipairs(rewardEntries(seq(cfg.reward))) do entries[#entries + 1] = e end
+    end
+    local grantable, missing = rewardsGrantable(entries)
+    if not grantable then
+      return failRes("SHOP.PURCHASE " .. id .. " reward not supported offline: " .. tostring(missing))
+    end
     local sync = { SHOP = shop }
     local price = tbl(cfg.price)
     local pid = tostring(price.id or "")
@@ -985,10 +1020,6 @@ local RESPONSES = {
       if not paid then return failRes("SHOP.PURCHASE " .. id .. " short of " .. tostring(short)) end
     end
     shop.tph[id] = (tonumber(shop.tph[id]) or 0) + count
-    local entries = {}
-    for _ = 1, count do
-      for _, e in ipairs(rewardEntries(seq(cfg.reward))) do entries[#entries + 1] = e end
-    end
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] SHOP.PURCHASE " .. id .. " x" .. count .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
