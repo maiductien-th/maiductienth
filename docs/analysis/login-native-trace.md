@@ -50,6 +50,28 @@ SDK calls, with the instruction that makes them:
 | Facebook | `FacebookAccount.Login` 0x17C4DC4 | `bl` @0x17C4E68 / @0x17C4E84 | `FB.get_IsInitialized` 0x1A9600C / `FB.get_IsLoggedIn` 0x1A95F1C |
 | Common | `CommonAccount.Login` 0x17C40B4 | `b` (tail) @0x17C4194 | `LuaManager.FireEvent` 0x17356D8 |
 
+Evidence for the SDK addresses in the right-hand column, from the dump (the `bl`
+targets above are the call sites; these are the declarations they land on):
+
+```
+$ grep -n -B1 'SignInWithCredentialAsync(Credential\|get_DefaultInstance()\|SignIn()\|GetCredential(string' out/recovered/dump.cs
+638774-	// RVA: 0x1AE8648 Offset: 0x1AE4648 VA: 0x1AE8648
+638775:	public static Credential GetCredential(string idToken, string accessToken) { }
+639341-	// RVA: 0x1AEBDC8 Offset: 0x1AE7DC8 VA: 0x1AEBDC8
+639342:	public static FirebaseAuth get_DefaultInstance() { }
+639388-	// RVA: 0x1AEC698 Offset: 0x1AE8698 VA: 0x1AEC698
+639389:	public Task<FirebaseUser> SignInWithCredentialAsync(Credential credential) { }
+67458-	// RVA: 0x1939528 Offset: 0x1935528 VA: 0x1939528
+67459:	public static GoogleSignIn get_DefaultInstance() { }
+67467-	// RVA: 0x1939610 Offset: 0x1935610 VA: 0x1939610
+67468:	public Task<GoogleSignInUser> SignIn() { }
+```
+
+The enclosing declarations are `public sealed class FirebaseAuth : IDisposable`
+(dump.cs:639258) and `public class GoogleSignIn` (dump.cs:67439). These classes
+are absent from the Phase 2 dump survey because that survey greps for login and
+currency patterns, not SDK types; the addresses above come from the dump directly.
+
 These are calls into provider SDKs. Whether a given one performs network I/O happens inside the SDK
 and is not observable from these call sites.
 
