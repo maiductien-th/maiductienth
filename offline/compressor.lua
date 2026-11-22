@@ -15,15 +15,11 @@ function Compressor:Compress(str)
 end
 
 function Compressor:Decompress(str)
-  print("[OFFLINE] Compressor:Decompress in=" .. type(str) ..
-        " len=" .. tostring(type(str) == "string" and #str or -1))
   if type(str) ~= "string" then return str end
   local ok, out = pcall(function() return LibDeflate:DecompressDeflate(str) end)
   if ok and type(out) == "string" and #out > 0 then
-    print("[OFFLINE] Decompress -> " .. #out .. " bytes: " .. string.sub(out, 1, 80))
     return out
   end
-  print("[OFFLINE] Decompress passthrough: " .. string.sub(str, 1, 80))
   return str
 end
 
