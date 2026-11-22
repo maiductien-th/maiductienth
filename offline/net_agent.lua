@@ -1587,56 +1587,62 @@ if MENU_BUILD then
     tip("unlocked skins: " .. n)
   end
 
-  -- One hit: battle_calculator GetDamageResult fills a shared result table
-  -- whose damage slot is PropertyNames.DAMAGE; raise the player's hits to
-  -- the target's remaining HP.
-  local onehitLogged = false
-  local function propNames(f)
-    for i = 1, 8 do
-      local name, v = debug.getupvalue(f, i)
-      if name == nil then break end
-      if name == "PropertyNames" and type(v) == "table" then return v end
+  -- One hit: the C# battle computes damage itself (battle_calculator's
+  -- GetDamageResult only verifies it), but it reads its character table
+  -- through ConfigMgr:loadCfgFile4CS. With one hit on, every non-hero unit
+  -- is handed to it with maxHp 1.
+  local ALLY_TYPES = { hero = true, pet = true, phantom = true, npc = true }
+  local typesLogged = false
+  local function onehitCharacters(data)
+    if type(data) ~= "table" then return data end
+    local out, n, types = {}, 0, {}
+    for id, row in pairs(data) do
+      local t = type(row) == "table" and tostring(row.type or "") or ""
+      types[t] = true
+      if type(row) == "table" and not ALLY_TYPES[t] and not tostring(id):match("^hero")
+          and (tonumber(row.maxHp) or 0) > 1 then
+        local c = {}
+        for k, v in pairs(row) do c[k] = v end
+        c.maxHp = 1
+        out[id] = c
+        n = n + 1
+      else
+        out[id] = row
+      end
     end
-    return nil
+    if not typesLogged then
+      typesLogged = true
+      local ts = {}
+      for t in pairs(types) do ts[#ts + 1] = t end
+      print("[OFFLINE-MENU] onehit character rows=" .. n .. " types=" .. table.concat(ts, ","))
+    end
+    return out
   end
-  local function prop(bc, obj, key)
-    if obj == nil or key == nil then return nil end
-    local ok, v = pcall(bc.GetPropertyOrDef, bc, obj, key)
-    if ok then return tonumber(v) end
-    return nil
+  local function reloadBattleConfig()
+    local gh = _ENV.GameHelper
+    if gh and gh.ReloadConfig then
+      local ok, err = pcall(gh.ReloadConfig)
+      print("[OFFLINE-MENU] ReloadConfig " .. tostring(ok) .. " " .. tostring(err))
+    end
   end
   function Menu.InstallOneHit()
-    local bc = _ENV.BattleCalculator
-    if type(bc) ~= "table" or bc.__offline_onehit or type(bc.GetDamageResult) ~= "function" then return end
-    local orig = bc.GetDamageResult
-    local P = propNames(orig) or {}
-    bc.GetDamageResult = function(self, attacker, target, ...)
-      local r = orig(self, attacker, target, ...)
-      if cheats().onehit and type(r) == "table" then
-        local camp = prop(self, attacker, P.CAMP)
-        if not onehitLogged then
-          onehitLogged = true
-          local ks = {}
-          for k in pairs(P) do ks[#ks + 1] = tostring(k) end
-          print("[OFFLINE-MENU] onehit first hit attacker=" .. ser(attacker, 1) .. " target=" .. ser(target, 1) ..
-            " result=" .. ser(r, 1) .. " names=" .. table.concat(ks, ","))
-        end
-        local isPlayer = type(attacker) == "table" and (attacker.is_player == true or attacker.isPlayer == true
-          or attacker.is_hero == true or attacker.camp == 1 or camp == 1)
-        if isPlayer and P.DAMAGE then
-          local hp = prop(self, target, P.HP) or prop(self, target, P.MAX_HP) or 0
-          r[P.DAMAGE] = math.max(tonumber(r[P.DAMAGE]) or 0, math.floor(hp) + 1, 99999999)
-        end
-      end
+    local cm = _ENV.ConfigMgr
+    if type(cm) ~= "table" or cm.__offline_onehit or type(cm.loadCfgFile4CS) ~= "function" then return end
+    local orig = cm.loadCfgFile4CS
+    cm.loadCfgFile4CS = function(self, name, ...)
+      local r = orig(self, name, ...)
+      print("[OFFLINE-MENU] loadCfgFile4CS " .. tostring(name))
+      if name == "character" and cheats().onehit then r = onehitCharacters(r) end
       return r
     end
-    bc.__offline_onehit = true
+    cm.__offline_onehit = true
+    if cheats().onehit then reloadBattleConfig() end
   end
   function Menu.ToggleOneHit()
     local c = cheats()
     c.onehit = not c.onehit
     saveState()
-    Menu.InstallOneHit()
+    if _ENV.ConfigMgr and _ENV.ConfigMgr.__offline_onehit then reloadBattleConfig() else Menu.InstallOneHit() end
     tip("one hit " .. (c.onehit and "ON" or "OFF"))
   end
 
