@@ -1,5 +1,5 @@
--- offline net_agent v5: introspect GameDef at runtime, return real SUCCESS
-print("[OFFLINE] net_agent source stub v5")
+-- Offline replacement for net/net_agent.lua: answers client requests from
+-- local state saved under the app's files dir; nothing goes over the network.
 local NetAgent = {}
 _ENV.NetAgent = NetAgent
 -- the stock net_agent loads ProtoGenerator via net.sproto_helper -> proto; battle_module needs the global
@@ -13,20 +13,16 @@ NetAgent.send_callback_list = {}
 NetAgent.pending = {}
 
 function NetAgent:Init(...)
-  print("[OFFLINE] NetAgent:Init")
   local self_ref = self
   local ok = pcall(function()
     self_ref.update_id = _ENV.World:RegistUpdate(function() self_ref:Update() end)
   end)
-  print("[OFFLINE] World:RegistUpdate(fn) ok=" .. tostring(ok))
   if not ok then
     local ok2 = pcall(function() _ENV.World:RegistUpdate(self_ref, self_ref.Update) end)
-    print("[OFFLINE] World:RegistUpdate(self,fn) ok=" .. tostring(ok2))
     if not ok2 then
-      local ok3 = pcall(function()
+      pcall(function()
         _ENV.FrameTimer:RegistTimer(1, function() self_ref:Update() end)
       end)
-      print("[OFFLINE] FrameTimer fallback ok=" .. tostring(ok3))
     end
   end
 end
@@ -59,20 +55,6 @@ function NetAgent:sendSproto(...) end
 function NetAgent:ApplyDisconnect(...) end
 function NetAgent:OnServerDisconnect(...) end
 
--- Diagnostic only: every field the client reads that the offline response
--- does not define is logged as MISSING so it can be given an explicit shape.
-local function autoviv(tag)
-  local mt
-  mt = { __index = function(t, k)
-    local path = rawget(t, "\0path") or tag
-    local full = path .. "." .. tostring(k)
-    print("[OFFLINE] MISSING " .. full)
-    local v = setmetatable({ ["\0path"] = full }, mt)
-    rawset(t, k, v)
-    return v
-  end }
-  return setmetatable({ ["\0path"] = tag }, mt)
-end
 
 local function ser(v, depth)
   depth = depth or 0
@@ -88,12 +70,6 @@ local function ser(v, depth)
     parts[#parts + 1] = key .. "=" .. ser(val, depth + 1)
   end
   return "{" .. table.concat(parts, ",") .. "}"
-end
-local function show(x)
-  if type(x) ~= "table" then return tostring(x) end
-  local p = {}
-  for k, v in pairs(x) do p[#p+1] = tostring(k) .. "=" .. show(v) end
-  table.sort(p); return "{" .. table.concat(p, ",") .. "}"
 end
 -- RemoteModuleBase.Init builds key_enum = Utils.genKeyIndex(init_data) and
 -- setData maps server data back with SyncIndex2Key, so the server ships
@@ -214,23 +190,6 @@ end
 -- {[ModuleDef.SYNC index] = data index-keyed with that module's key_enum},
 -- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
 -- before the request callback runs (stock net_agent.lua:656).
-local function dumpCfg(tag, cfg)
-  if type(cfg) ~= "table" then
-    print("[OFFLINE] cfg " .. tag .. " = " .. tostring(cfg))
-    return
-  end
-  local parts = {}
-  for k, v in pairs(cfg) do
-    local vs = v
-    if type(v) == "table" then
-      local inner = {}
-      for k2, v2 in pairs(v) do inner[#inner + 1] = tostring(k2) .. ":" .. tostring(v2) end
-      vs = "{" .. table.concat(inner, ",") .. "}"
-    end
-    parts[#parts + 1] = tostring(k) .. "=" .. tostring(vs)
-  end
-  print("[OFFLINE] cfg " .. tag .. " {" .. table.concat(parts, ";") .. "}")
-end
 
 local function fireSync(agent, partials)
   if type(partials) ~= "table" then return end
@@ -269,19 +228,7 @@ local function fireSync(agent, partials)
   if n == 0 then return end
   saveState()
   local literal = ser(out)
-  print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
   _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
-  if partials.ECO then
-    pcall(function()
-      local em = _ENV.EconomicModule
-      local parts = {}
-      for k, v in pairs(em.economic_index2key or {}) do parts[#parts + 1] = tostring(k) .. "->" .. tostring(v) end
-      local d = em:GetDataByKey("d") or {}
-      local ds = {}
-      for k, v in pairs(d) do ds[#ds + 1] = tostring(k) .. "=" .. tostring(v) end
-      print("[OFFLINE] ECO index2key {" .. table.concat(parts, ",") .. "} d {" .. table.concat(ds, ",") .. "}")
-    end)
-  end
 end
 
 local function addChosenTco(st, list)
@@ -316,16 +263,10 @@ local function setGuideFlags(steps)
       g.st = step
       local ok, cfg = pcall(function() return cm:getGuideConfig(step) end)
       cfg = ok and cfg or nil
-      local desc = {}
-      if type(cfg) == "table" then
-        for k, v in pairs(cfg) do desc[#desc + 1] = tostring(k) .. "=" .. tostring(v) end
-      end
-      print("[OFFLINE] guide step " .. tostring(step) .. " cfg={" .. table.concat(desc, ",") .. "}")
       for _, fid in ipairs(guideFlagIds(cfg)) do
         local fok, idx = pcall(function() return cm:GetFlagIndex(fid) end)
         idx = fok and tonumber(idx) or nil
         if idx and idx >= 1 then gf = gf | (1 << (math.floor(idx) - 1)) end
-        print("[OFFLINE] guide flag " .. fid .. " index=" .. tostring(idx))
       end
     end
   end
@@ -547,10 +488,15 @@ local RESPONSES = {
     local eco = sync.ECO
     local t, removed = {}, 0
     local want = math.max(1, math.floor(tonumber(data.use_count) or 1))
+    -- realitem UseCondition "WaitTime:N": the box opens N seconds after it
+    -- was obtained (ECO.t entry [2] is the obtain time).
+    local wait = tonumber(tostring(rcfg.UseCondition or ""):match("WaitTime:(%d+)")) or 0
+    local now = os.time()
     for _, x in ipairs(type(eco.t) == "table" and eco.t or {}) do
       local v = type(x) == "table" and (tonumber(x[1]) or 0) or 0
       if v ~= 0 then
-        if removed < want and ((v >> 7) & 511) == rid then
+        local ready = now - (tonumber(x[2]) or now) >= wait
+        if removed < want and ready and ((v >> 7) & 511) == rid then
           removed = removed + 1
         else
           t[#t + 1] = x
@@ -558,7 +504,7 @@ local RESPONSES = {
       end
     end
     if removed == 0 then
-      print("[OFFLINE] ITEM.USE item not owned " .. tostring(data.item_id))
+      print("[OFFLINE] ITEM.USE not owned or not ready " .. tostring(data.item_id))
       return { ret_code = protoCode("FAIL", 0) }
     end
     eco.t = t
@@ -589,8 +535,6 @@ local RESPONSES = {
     st.time = 0
     NetAgent.battle = st
     pcall(function()
-      dumpCfg("stage " .. stage, _ENV.ConfigMgr:GetStageConfig(stage))
-      dumpCfg("room " .. st.rid, _ENV.ConfigMgr:GetRoomConfig(st.rid))
     end)
     return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
   end,
@@ -608,7 +552,6 @@ local RESPONSES = {
     st.time = math.floor(tonumber(data.time) or st.time or 0)
     addChosenTco(st, data.choose_tco)
     NetAgent.battle = st
-    pcall(function() dumpCfg("room " .. st.rid, _ENV.ConfigMgr:GetRoomConfig(st.rid)) end)
     return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
   end,
   -- BATTLE.CHOOSE_TCO (battle_module_tco.lua:636-675) sends {id = tco
@@ -709,19 +652,6 @@ local function offlineResponse(group, name, data)
     local res, sync = build(data)
     return res, true, sync
   end
-  local pf = io.open(SAVE_PATH:gsub("offline_profile.lua$", "offline_patch.lua"), "r")
-  if pf then
-    local text = pf:read("*a"); pf:close()
-    local chunk = load(text, "offline_patch", "t", _ENV)
-    if chunk then
-      local ok, extra = pcall(chunk)
-      if ok and type(extra) == "table" and extra[tag] then
-        print("[OFFLINE] PATCHED " .. tag)
-        local res, sync = extra[tag](data, { protoCode = protoCode, moduleState = moduleState, moduleDefaults = moduleDefaults, NetAgent = NetAgent })
-        return res, true, sync
-      end
-    end
-  end
   print("[OFFLINE] UNRESOLVED " .. tag .. " -> ret_code=OFFLINE")
   return { ret_code = protoCode("OFFLINE", -1) }, false
 end
@@ -745,9 +675,6 @@ end
 -- (LuaHelper.GetInt(1) fails on a table there), then the response.
 function NetAgent:SendRequest4CS(group, name, args)
   print("[OFFLINE] SendRequest4CS group=" .. tostring(group) .. " name=" .. tostring(name))
-  if type(args) == "table" then
-    for k, v in pairs(args) do print("[OFFLINE]   arg " .. tostring(k) .. " = " .. tostring(v)) end
-  else print("[OFFLINE]   args " .. type(args) .. " " .. tostring(args)) end
   local session = self.cs_session or 1
   self.cs_session = session + 1
   local res, _, sync = offlineResponse(group, name, args)
@@ -764,49 +691,25 @@ function NetAgent:SendRequest4CS(group, name, args)
   return session
 end
 
-local function dumpTable(label, t)
-  if type(t) ~= "table" then print("[OFFLINE] " .. label .. " is " .. type(t)); return end
-  local n = 0
-  for k, v in pairs(t) do
-    print("[OFFLINE] " .. label .. "." .. tostring(k) .. " = " .. tostring(v))
-    n = n + 1
-    if n > 60 then break end
-  end
-end
 
 function NetAgent:Login(...)
-  print("[OFFLINE] NetAgent:Login (v5)")
   local gd = _ENV.GameDef
-  print("[OFFLINE] GameDef is " .. type(gd))
   local success = 1
   if type(gd) == "table" then
-    print("[OFFLINE] IS_COMPRESS = " .. tostring(gd.IS_COMPRESS))
-    dumpTable("LOGIN_RESULT", gd.LOGIN_RESULT)
     if type(gd.LOGIN_RESULT) == "table" and gd.LOGIN_RESULT.SUCCESS ~= nil then
       success = gd.LOGIN_RESULT.SUCCESS
     end
   end
-  print("[OFFLINE] using login_result = " .. tostring(success))
 
   -- role_data: the client's own new-player defaults from ModuleDef.SYNC,
   -- serialized as a plain data literal (str2lua loads it in a sandbox, so it
   -- must not call functions).
-  do
-    local sample = {aa=1, bb={x=2}, cc="s"}
-    local ix, order = encode(sample)
-    print("[OFFLINE] probe en=" .. show(_ENV.Utils.genKeyIndex(sample)) .. " ix=" .. show(ix) .. " order=" .. order)
-  end
-  if type(_ENV.GameDef) == "table" then dumpTable("GameDef.PROTO_CODE", _ENV.GameDef.PROTO_CODE) end
   local U = _ENV.Utils
   local profile = {}
   local state = initState()
   local md = _ENV.ModuleDef
   if type(md) == "table" and type(md.SYNC) == "table" then
     for i, m in ipairs(md.SYNC) do
-      local keys = {}
-      if type(m.data) == "table" then for k in pairs(m.data) do keys[#keys + 1] = tostring(k) end end
-      print("[OFFLINE] SYNC[" .. i .. "] name=" .. tostring(m.name) .. " script=" .. tostring(m.script) ..
-            " version=" .. tostring(m.version) .. " data_keys=" .. table.concat(keys, ","))
       local data = state[m.name] or m.data or {}
       local ix, order = encode(wire(m.name, data))
       if ix == nil then
@@ -819,7 +722,6 @@ function NetAgent:Login(...)
     print("[OFFLINE] ModuleDef.SYNC missing: " .. type(md))
   end
   local literal = ser(profile)
-  print("[OFFLINE] role_data literal bytes=" .. #literal .. " head=" .. string.sub(literal, 1, 120))
   local role = ""
   local ok, packed = pcall(function()
     if _ENV.Compressor and _ENV.Compressor.Compress then
@@ -828,7 +730,6 @@ function NetAgent:Login(...)
     return literal
   end)
   if ok and type(packed) == "string" then role = packed end
-  print("[OFFLINE] role_data bytes = " .. tostring(#role))
 
   self.logined = true
   return {
