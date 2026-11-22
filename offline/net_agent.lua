@@ -1069,7 +1069,9 @@ local RESPONSES = {
     local limit = tonumber(_ENV.ConfigMgr["box_limit_" .. boxId]) or 999
     if (tonumber(box.ot[boxId]) or 0) >= limit then return failRes("SHOP.OPEN_BOX " .. boxId .. " daily limit") end
     local sync = { BOX = box }
-    if data.ad_sig == nil and price.id ~= nil and price.id ~= "video" then
+    -- Only video-priced boxes are free; the UI passes an ad_sig argument
+    -- for paid boxes too, so it does not waive the price.
+    if price.id ~= nil and price.id ~= "video" then
       local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * paidCount })
       if not paid then return failRes("SHOP.OPEN_BOX " .. boxId .. " short of " .. tostring(short)) end
     end
