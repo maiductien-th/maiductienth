@@ -121,18 +121,91 @@ function NetAgent:Login(...)
   end
   print("[OFFLINE] using login_result = " .. tostring(success))
 
-  -- role_data is a deflate-compressed Lua table literal that every client
-  -- module reads a slice of. An empty table makes them index nil, so ship a
-  -- table that creates nested tables on demand.
-  local AUTOVIV = "setmetatable({},{__index=function(t,k) " ..
-                  "local v=setmetatable({},getmetatable(t)) " ..
-                  "rawset(t,k,v) return v end})"
+  -- role_data: the client's own new-player defaults from ModuleDef.SYNC,
+  -- serialized as a plain data literal (str2lua loads it in a sandbox, so it
+  -- must not call functions).
+  local function ser(v, depth)
+    depth = depth or 0
+    local t = type(v)
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t == "string" then return string.format("%q", v) end
+    if t ~= "table" or depth > 12 then return "nil" end
+    local parts = {}
+    for k, val in pairs(v) do
+      local key
+      if type(k) == "number" then key = "[" .. tostring(k) .. "]"
+      else key = "[" .. string.format("%q", tostring(k)) .. "]" end
+      parts[#parts + 1] = key .. "=" .. ser(val, depth + 1)
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  local U = _ENV.Utils
+  local function show(x)
+    if type(x) ~= "table" then return tostring(x) end
+    local p = {}
+    for k, v in pairs(x) do p[#p+1] = tostring(k) .. "=" .. show(v) end
+    table.sort(p); return "{" .. table.concat(p, ",") .. "}"
+  end
+  -- RemoteModuleBase.Init builds key_enum = Utils.genKeyIndex(init_data) and
+  -- setData maps server data back with SyncIndex2Key, so the server ships
+  -- module data index-keyed. Pick the Key2Index argument order that
+  -- roundtrips through Index2Key instead of assuming it.
+  local function same(x, y)
+    if type(x) ~= type(y) then return false end
+    if type(x) ~= "table" then return x == y end
+    for k, v in pairs(x) do if not same(v, y[k]) then return false end end
+    for k in pairs(y) do if x[k] == nil then return false end end
+    return true
+  end
+  local function encode(data)
+    local en = U.genKeyIndex(data)
+    for _, order in ipairs({1, 2}) do
+      local ok, ix = pcall(function()
+        if order == 1 then return U.Key2Index(data, en) end
+        return U.Key2Index(en, data)
+      end)
+      if ok and type(ix) == "table" then
+        local ok2, back = pcall(function()
+          if order == 1 then return U.Index2Key(ix, en) end
+          return U.Index2Key(en, ix)
+        end)
+        if ok2 and same(back, data) then return ix, order end
+      end
+    end
+    return nil, 0
+  end
+  do
+    local sample = {aa=1, bb={x=2}, cc="s"}
+    local ix, order = encode(sample)
+    print("[OFFLINE] probe en=" .. show(U.genKeyIndex(sample)) .. " ix=" .. show(ix) .. " order=" .. order)
+  end
+  local profile = {}
+  local md = _ENV.ModuleDef
+  if type(md) == "table" and type(md.SYNC) == "table" then
+    for i, m in ipairs(md.SYNC) do
+      local keys = {}
+      if type(m.data) == "table" then for k in pairs(m.data) do keys[#keys + 1] = tostring(k) end end
+      print("[OFFLINE] SYNC[" .. i .. "] name=" .. tostring(m.name) .. " script=" .. tostring(m.script) ..
+            " version=" .. tostring(m.version) .. " data_keys=" .. table.concat(keys, ","))
+      local data = m.data or {}
+      local ix, order = encode(data)
+      if ix == nil then
+        print("[OFFLINE] SYNC[" .. i .. "] " .. tostring(m.name) .. " UNENCODED (no roundtrip)")
+        ix = data
+      end
+      profile[i] = ix
+    end
+  else
+    print("[OFFLINE] ModuleDef.SYNC missing: " .. type(md))
+  end
+  local literal = ser(profile)
+  print("[OFFLINE] role_data literal bytes=" .. #literal .. " head=" .. string.sub(literal, 1, 120))
   local role = ""
   local ok, packed = pcall(function()
     if _ENV.Compressor and _ENV.Compressor.Compress then
-      return _ENV.Compressor:Compress(AUTOVIV)
+      return _ENV.Compressor:Compress(literal)
     end
-    return AUTOVIV
+    return literal
   end)
   if ok and type(packed) == "string" then role = packed end
   print("[OFFLINE] role_data bytes = " .. tostring(#role))
