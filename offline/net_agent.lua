@@ -766,6 +766,21 @@ local function regenEnergy(en)
   en.e = e
   en.tst = e >= maxE and 0 or tst + n * step
 end
+-- purchase_module keeps daily()/weekly()/monthly() in a local table that
+-- GetLimitPurchaseCount reads as an upvalue; use the same functions so the
+-- stored period number matches what the client compares against.
+local function purchasePeriodFn(period)
+  if type(period) ~= "string" then return nil end
+  local pm = _ENV.PurchaseModule
+  local f = type(pm) == "table" and pm.GetLimitPurchaseCount
+  if type(f) ~= "function" or type(debug) ~= "table" then return nil end
+  for i = 1, 16 do
+    local name, v = debug.getupvalue(f, i)
+    if name == nil then break end
+    if type(v) == "table" and type(rawget(v, period)) == "function" then return v[period] end
+  end
+  return nil
+end
 local function today()
   local ok, v = pcall(function() return _ENV.GetDateNumber() end)
   if ok and tonumber(v) then return tonumber(v) end
@@ -1149,7 +1164,7 @@ local RESPONSES = {
     local cl = cfg.conditionLimit
     if type(cl) == "table" then
       local period, index, limit = cfgAt(cl, 1), tonumber(cfgAt(cl, 2)), tonumber(cfgAt(cl, 3))
-      local fn = type(period) == "string" and _ENV[period]
+      local fn = purchasePeriodFn(period)
       if type(fn) ~= "function" or not index or not limit then
         return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " bad conditionLimit " .. ser(cl))
       end
