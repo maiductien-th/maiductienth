@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the offline APK: swap the Lua net layer in assets/scp.ab, re-sign.
 #   KS_PASS=... tools/build_offline_apk.sh work/base.apk offline work/FINAL.apk
+# MENU=1 builds the offline-menu variant (MENU_BUILD = true in net_agent.lua).
 set -euo pipefail
 APK=${1:-work/base.apk}
 LUA_DIR=${2:-offline}
@@ -15,6 +16,13 @@ if [ -n "${BUILD_TOOLS:-}" ]; then ZIPALIGN="$BUILD_TOOLS/zipalign"; APKSIGNER="
 [ -n "${KS_PASS:-}" ] || { echo "set KS_PASS to the password of $KS" >&2; exit 1; }
 python3 -c "import UnityPy" 2>/dev/null || { echo "UnityPy missing; run tools/setup.sh" >&2; exit 1; }
 TMP=$(mktemp -d)
+if [ "${MENU:-0}" = 1 ]; then
+  mkdir "$TMP/lua"
+  cp "$LUA_DIR"/*.lua "$TMP/lua/"
+  grep -q '^local MENU_BUILD = false$' "$TMP/lua/net_agent.lua" || { echo "MENU_BUILD flag not found" >&2; exit 1; }
+  sed -i 's/^local MENU_BUILD = false$/local MENU_BUILD = true/' "$TMP/lua/net_agent.lua"
+  LUA_DIR="$TMP/lua"
+fi
 
 unzip -o -q "$APK" assets/scp.ab -d "$TMP"
 PYTHONPATH="$(dirname "$0")" python3 - "$TMP/assets/scp.ab" "$LUA_DIR" <<'PY'

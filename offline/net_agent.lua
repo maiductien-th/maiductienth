@@ -144,6 +144,8 @@ end
 -- own ModuleDef.SYNC defaults, replaced per module on every sync, and saved
 -- to the app's private files dir so it survives a restart.
 local SAVE_PATH = "/data/data/com.fattoy.swordash.android/files/offline_profile.lua"
+-- tools/build_offline_apk.sh sets this to true for the offline-menu variant.
+local MENU_BUILD = false
 NetAgent.state = NetAgent.state or nil
 local function saveState()
   if type(NetAgent.state) ~= "table" then return end
@@ -203,6 +205,12 @@ local function initState()
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
+  if MENU_BUILD then
+    st._cheat = saved and type(saved._cheat) == "table" and saved._cheat or {}
+    -- GMModule.IsGM (GameDef.FLAG.GM = 1) makes login_mgr open the GM panel,
+    -- which lists the offline menu below.
+    if type(st.GM) == "table" then st.GM.f = (tonumber(st.GM.f) or 0) | 1 end
+  end
   if NetAgent.ensureShops and type(st.SHOP) == "table" then NetAgent.ensureShops(st.SHOP) end
   print("[OFFLINE] profile restored modules=" .. n)
   NetAgent.state = st
@@ -1498,6 +1506,157 @@ local RESPONSES = {
   end,
 }
 
+-- skin_view OnPressedWearSkin -> PLAYER.WEAR_SKIN. PLAYER.ws holds the worn
+-- skin index in its low 8 bits (player_module GetSkinWearIndex, & 255) and
+-- the random-skin switch in bit 8; PLAYER.sl is the owned-skin bitset
+-- (GetSaveData: word ceil(i/32), bit (i-1)%32).
+local function skinIndexOf(v)
+  if type(v) == "number" then return math.floor(v) end
+  if type(v) == "string" then
+    local ok, c = pcall(function() return _ENV.ConfigMgr:GetSkinConfig(v) end)
+    if ok and type(c) == "table" then return tonumber(c.index) end
+    return tonumber(v)
+  end
+  return nil
+end
+local function skinOwned(pl, idx)
+  if idx == 1 then return true end
+  local w = tonumber(tbl(pl.sl)[(idx - 1) // 32 + 1]) or 0
+  return (w >> ((idx - 1) % 32)) & 1 == 1
+end
+RESPONSES["PLAYER.WEAR_SKIN"] = function(data)
+  print("[OFFLINE] PLAYER.WEAR_SKIN " .. ser(data))
+  local idx
+  if type(data) == "table" then
+    for _, k in ipairs({ "index", "skin_index", "skin_id", "id", "skin" }) do
+      idx = idx or skinIndexOf(data[k])
+    end
+    if not idx then for _, v in pairs(data) do idx = idx or skinIndexOf(v) end end
+  else
+    idx = skinIndexOf(data)
+  end
+  if not idx or idx < 1 or idx > 255 then return failRes("PLAYER.WEAR_SKIN bad skin " .. ser(data)) end
+  local pl = moduleState("PLAYER")
+  if not skinOwned(pl, idx) then return failRes("PLAYER.WEAR_SKIN skin " .. idx .. " not owned") end
+  pl.ws = ((tonumber(pl.ws) or 0) & ~255) | idx
+  return okRes(), { PLAYER = pl }
+end
+
+if MENU_BUILD then
+  local CAP = 2147483647
+  local AMOUNT = 99999999
+  local Menu = {}
+  _ENV.OfflineMenu = Menu
+  local function cheats()
+    local st = NetAgent.state or initState()
+    st._cheat = type(st._cheat) == "table" and st._cheat or {}
+    return st._cheat
+  end
+  local function tip(msg)
+    print("[OFFLINE-MENU] " .. msg)
+    pcall(function() _ENV.GameHelper.ShowUITips(msg) end)
+  end
+  function Menu.AddResource(id, amount)
+    amount = math.floor(tonumber(amount) or AMOUNT)
+    local eco = moduleState("ECO")
+    eco.d = tbl(eco.d)
+    local before = tonumber(eco.d[id]) or 0
+    eco.d[id] = math.min(CAP, before + amount)
+    fireSync(NetAgent, { ECO = eco })
+    tip(id .. " " .. before .. " -> " .. eco.d[id])
+  end
+  function Menu.UnlockSkins()
+    local pl = moduleState("PLAYER")
+    local sl = tbl(pl.sl)
+    local n = 0
+    for _, c in pairs(_ENV.ConfigMgr:GetConfig("skin") or {}) do
+      local i = type(c) == "table" and tonumber(c.index)
+      if i and i >= 1 then
+        local w = (i - 1) // 32 + 1
+        sl[w] = (tonumber(sl[w]) or 0) | (1 << ((i - 1) % 32))
+        n = n + 1
+      end
+    end
+    pl.sl = sl
+    fireSync(NetAgent, { PLAYER = pl })
+    pcall(function() _ENV.Event:FireEvent(NetAgent, "SKIN.CHANGED") end)
+    tip("unlocked skins: " .. n)
+  end
+
+  -- One hit: battle_calculator GetDamageResult fills a shared result table
+  -- whose damage slot is PropertyNames.DAMAGE; raise the player's hits to
+  -- the target's remaining HP.
+  local onehitLogged = false
+  local function propNames(f)
+    for i = 1, 8 do
+      local name, v = debug.getupvalue(f, i)
+      if name == nil then break end
+      if name == "PropertyNames" and type(v) == "table" then return v end
+    end
+    return nil
+  end
+  local function prop(bc, obj, key)
+    if obj == nil or key == nil then return nil end
+    local ok, v = pcall(bc.GetPropertyOrDef, bc, obj, key)
+    if ok then return tonumber(v) end
+    return nil
+  end
+  function Menu.InstallOneHit()
+    local bc = _ENV.BattleCalculator
+    if type(bc) ~= "table" or bc.__offline_onehit or type(bc.GetDamageResult) ~= "function" then return end
+    local orig = bc.GetDamageResult
+    local P = propNames(orig) or {}
+    bc.GetDamageResult = function(self, attacker, target, ...)
+      local r = orig(self, attacker, target, ...)
+      if cheats().onehit and type(r) == "table" then
+        local camp = prop(self, attacker, P.CAMP)
+        if not onehitLogged then
+          onehitLogged = true
+          local ks = {}
+          for k in pairs(P) do ks[#ks + 1] = tostring(k) end
+          print("[OFFLINE-MENU] onehit first hit attacker=" .. ser(attacker, 1) .. " target=" .. ser(target, 1) ..
+            " result=" .. ser(r, 1) .. " names=" .. table.concat(ks, ","))
+        end
+        local isPlayer = type(attacker) == "table" and (attacker.is_player == true or attacker.isPlayer == true
+          or attacker.is_hero == true or attacker.camp == 1 or camp == 1)
+        if isPlayer and P.DAMAGE then
+          local hp = prop(self, target, P.HP) or prop(self, target, P.MAX_HP) or 0
+          r[P.DAMAGE] = math.max(tonumber(r[P.DAMAGE]) or 0, math.floor(hp) + 1, 99999999)
+        end
+      end
+      return r
+    end
+    bc.__offline_onehit = true
+  end
+  function Menu.ToggleOneHit()
+    local c = cheats()
+    c.onehit = not c.onehit
+    saveState()
+    Menu.InstallOneHit()
+    tip("one hit " .. (c.onehit and "ON" or "OFF"))
+  end
+
+  local PRESET = {
+    { "+99999999 Vang (coin)", "OfflineMenu.AddResource('coin', 99999999)" },
+    { "+99999999 Zeno (rmb)", "OfflineMenu.AddResource('rmb', 99999999)" },
+    { "+99999999 Quang luc lam (stone)", "OfflineMenu.AddResource('stone', 99999999)" },
+    { "Unlock all skins", "OfflineMenu.UnlockSkins()" },
+    { "One hit ON/OFF", "OfflineMenu.ToggleOneHit()" },
+  }
+  function Menu.Patch()
+    Menu.InstallOneHit()
+    local gm = _ENV.GM
+    if type(gm) ~= "table" then
+      local ok = pcall(require, "module.gm")
+      gm = ok and _ENV.GM or nil
+    end
+    if type(gm) == "table" and not gm.__offline_menu then
+      gm.PresetCMD = function() return PRESET end
+      gm.__offline_menu = true
+    end
+  end
+end
+
 local function offlineResponse(group, name, data)
   local tag = tostring(group) .. "." .. tostring(name)
   local build = RESPONSES[tag]
@@ -1537,6 +1696,7 @@ end
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
   patchCustomData()
+  if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
   local res, _, sync = offlineResponse(group, name, data)
   local agent = self
   -- the caller publishes SERVER_RESPONSE from this callback and only then
