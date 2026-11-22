@@ -3,7 +3,7 @@
 #   tools/build_offline_apk.sh work/base.apk offline/net_agent.lua work/FINAL.apk
 set -euo pipefail
 APK=${1:-work/base.apk}
-LUA=${2:-offline/net_agent.lua}
+LUA_DIR=${2:-offline}
 OUT=${3:-work/FINAL.apk}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KS=${KEYSTORE:-$ROOT/keys/my.jks}
@@ -15,25 +15,32 @@ if [ -n "${BUILD_TOOLS:-}" ]; then ZIPALIGN="$BUILD_TOOLS/zipalign"; APKSIGNER="
 TMP=$(mktemp -d)
 
 unzip -o -q "$APK" assets/scp.ab -d "$TMP"
-PYTHONPATH="$(dirname "$0")" python3 - "$TMP/assets/scp.ab" "$LUA" <<'PY'
+PYTHONPATH="$(dirname "$0")" python3 - "$TMP/assets/scp.ab" "$LUA_DIR" <<'PY'
 import sys, warnings
 import UnityPy
 import ab_pack
 warnings.filterwarnings("ignore")
-bundle_path, lua_path = sys.argv[1], sys.argv[2]
+import os
+bundle_path, lua_dir = sys.argv[1], sys.argv[2]
 orig = open(bundle_path, "rb").read()
 env = UnityPy.load(ab_pack.decode(orig))
-src = open(lua_path).read()
+replacements = {
+    os.path.splitext(f)[0]: open(os.path.join(lua_dir, f)).read()
+    for f in os.listdir(lua_dir) if f.endswith(".lua")
+}
+done = []
 for obj in env.objects:
     if obj.type.name != "TextAsset":
         continue
     ta = obj.read()
-    if ta.m_Name == "net_agent":
-        ta.m_Script = src
+    if ta.m_Name in replacements:
+        ta.m_Script = replacements[ta.m_Name]
         ta.save()
-        break
-else:
-    raise SystemExit("net_agent TextAsset not found")
+        done.append(ta.m_Name)
+missing = set(replacements) - set(done)
+if missing:
+    raise SystemExit("TextAssets not found: " + ", ".join(sorted(missing)))
+print("replaced:", ", ".join(sorted(done)))
 serialized = list(env.file.files.values())[0].save()
 open(bundle_path, "wb").write(ab_pack.build(serialized, orig))
 print("rebuilt", bundle_path)
