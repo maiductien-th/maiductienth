@@ -247,13 +247,41 @@ local function addChosenTco(st, list)
   end
 end
 
+-- GUIDE.st is the last finished step (GuideModule:GetCurrentStep reads it);
+-- GUIDE.gf is a bit set indexed by ConfigMgr:GetFlagIndex(flag_id), where
+-- flag ids ("flag_open_box", ...) come from the finished step's guide config.
+local function guideFlagIds(cfg)
+  local out = {}
+  if type(cfg) ~= "table" then return out end
+  for k, v in pairs(cfg) do
+    if type(v) == "string" then
+      for id in v:gmatch("flag_[%w_]+") do out[#out + 1] = id end
+    end
+  end
+  return out
+end
+
 local function setGuideFlags(steps)
   local g = moduleState("GUIDE")
   local gf = math.floor(tonumber(g.gf) or 0)
+  local cm = _ENV.ConfigMgr
   for _, step in ipairs(type(steps) == "table" and steps or {}) do
-    local idx = tonumber(_ENV.ConfigMgr:GetFlagIndex(step))
-    if idx and idx >= 1 then gf = gf | (1 << (math.floor(idx) - 1)) end
-    print("[OFFLINE] guide step " .. tostring(step) .. " flag=" .. tostring(idx))
+    if step ~= nil then
+      g.st = step
+      local ok, cfg = pcall(function() return cm:getGuideConfig(step) end)
+      cfg = ok and cfg or nil
+      local desc = {}
+      if type(cfg) == "table" then
+        for k, v in pairs(cfg) do desc[#desc + 1] = tostring(k) .. "=" .. tostring(v) end
+      end
+      print("[OFFLINE] guide step " .. tostring(step) .. " cfg={" .. table.concat(desc, ",") .. "}")
+      for _, fid in ipairs(guideFlagIds(cfg)) do
+        local fok, idx = pcall(function() return cm:GetFlagIndex(fid) end)
+        idx = fok and tonumber(idx) or nil
+        if idx and idx >= 1 then gf = gf | (1 << (math.floor(idx) - 1)) end
+        print("[OFFLINE] guide flag " .. fid .. " index=" .. tostring(idx))
+      end
+    end
   end
   g.gf = gf
   return g
