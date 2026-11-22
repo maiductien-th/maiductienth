@@ -186,6 +186,12 @@ local function initState()
       if st[name] ~= nil and type(data) == "table" then st[name] = data; n = n + 1 end
     end
   end
+  -- No ad network offline: VIP/GM flag NO_AD (GameDef 8) makes
+  -- VipModule.IsNoADForCS tell AdRewardMgr to grant ad rewards directly.
+  for _, m in ipairs({ "VIP", "GM" }) do
+    if type(st[m]) == "table" then st[m].f = (tonumber(st[m].f) or 0) | 8 end
+  end
+  if NetAgent.ensureShops and type(st.SHOP) == "table" then NetAgent.ensureShops(st.SHOP) end
   print("[OFFLINE] profile restored modules=" .. n)
   NetAgent.state = st
   return st
@@ -454,6 +460,227 @@ end
 -- Anything not listed gets the client's own "not connected" answer,
 -- {ret_code = PROTO_CODE.OFFLINE}, which the stock net_agent sends to every
 -- pending callback on disconnect; no fields are invented for it.
+-- Offline economy helpers shared by the shop, equipment, technology,
+-- sign-in and battle-reward handlers below.
+local function okRes(t)
+  t = t or {}
+  t.ret_code = protoCode("SUCCESS", 1)
+  return t
+end
+local function failRes(msg)
+  print("[OFFLINE] " .. msg)
+  return { ret_code = protoCode("FAIL", 0) }
+end
+local function tbl(v) return type(v) == "table" and v or {} end
+-- Config tables are arrays or string-keyed "1","2",...; return the values in key order.
+local function seq(t)
+  if type(t) ~= "table" then return {} end
+  if t.id ~= nil then return { t } end
+  local keys = {}
+  for k in pairs(t) do if tonumber(k) then keys[#keys + 1] = k end end
+  table.sort(keys, function(a, b) return tonumber(a) < tonumber(b) end)
+  local out = {}
+  for _, k in ipairs(keys) do out[#out + 1] = t[k] end
+  return out
+end
+local function cfgAt(t, k)
+  if type(t) ~= "table" then return nil end
+  local v = t[k]
+  if v == nil then v = t[tostring(k)] end
+  if v == nil and tonumber(k) then v = t[math.floor(tonumber(k))] end
+  return v
+end
+
+-- How many of an item the player owns: Economic items are counters in
+-- ECO.d, other realitems are one ECO.t entry each ((rid << 7) | 1).
+local function owned(sync, id)
+  sync.ECO = sync.ECO or moduleState("ECO")
+  local eco = sync.ECO
+  eco.d = tbl(eco.d)
+  local items = _ENV.ConfigMgr:GetConfig("item") or {}
+  local cfg = items[id]
+  if type(cfg) == "table" and cfg.type == "Economic" then
+    return tonumber(eco.d[id]) or 0, "d"
+  end
+  local rid = realIdOf(id)
+  if not rid then return 0 end
+  local n = 0
+  for _, x in ipairs(tbl(eco.t)) do
+    local v = type(x) == "table" and (tonumber(x[1]) or 0) or 0
+    if v ~= 0 and ((v >> 7) & 511) == rid then n = n + 1 end
+  end
+  return n, "t", rid
+end
+
+-- Deducts every {[item_id] = count} cost, or nothing if one is short.
+local function spend(sync, costs)
+  for id, n in pairs(costs) do
+    if (owned(sync, id)) < (tonumber(n) or 0) then return false, id end
+  end
+  for id, n in pairs(costs) do
+    n = math.floor(tonumber(n) or 0)
+    if n > 0 then
+      local have, kind, rid = owned(sync, id)
+      local eco = sync.ECO
+      if kind == "d" then
+        eco.d[id] = have - n
+      else
+        local t, removed = {}, 0
+        for _, x in ipairs(tbl(eco.t)) do
+          local v = type(x) == "table" and (tonumber(x[1]) or 0) or 0
+          if v ~= 0 then
+            if removed < n and ((v >> 7) & 511) == rid then removed = removed + 1 else t[#t + 1] = x end
+          end
+        end
+        eco.t = t
+      end
+    end
+  end
+  return true
+end
+
+-- remote_module_base.GetBitIndexAndOffset: per = floor(32 / bits) values per
+-- 32-bit word, word = floor(index / per) + 1, shift = (index % per) * bits.
+local function setBits(t, index, bits, value)
+  local per = 32 // bits
+  local w = index // per + 1
+  local sh = (index % per) * bits
+  for i = 1, w do t[i] = t[i] or 0 end
+  local mask = ((1 << bits) - 1) << sh
+  t[w] = (t[w] & ~mask) | ((value << sh) & mask)
+end
+
+-- No client config holds the server's shop roll; one entry per pool is
+-- picked by weight, with no discount (DISCOUNT_ENUM index 1 = 100%).
+local POOL_SHOPS = { "coin", "gem", "tb" }
+local function noDiscountIndex()
+  local de = _ENV.GameDef and _ENV.GameDef.DISCOUNT_ENUM
+  if type(de) == "table" then
+    for i, v in ipairs(de) do if tonumber(v) == 100 then return i end end
+  end
+  return 1
+end
+local function rollShop(shopType)
+  local rows = _ENV.ConfigMgr:GetConfig("shop") or {}
+  local pools, order = {}, {}
+  for _, r in pairs(rows) do
+    if type(r) == "table" and r.shop == shopType and (tonumber(r.bitIndex) or 0) > 0
+        and (tonumber(r.hide) or 0) == 0 then
+      local p = (r.pool ~= nil and r.pool ~= "") and r.pool or r.id
+      if not pools[p] then pools[p] = {}; order[#order + 1] = p end
+      table.insert(pools[p], r)
+    end
+  end
+  table.sort(order)
+  local slot = { id = {}, d = {}, c = 0 }
+  local dn = noDiscountIndex()
+  for _, p in ipairs(order) do
+    local list = pools[p]
+    table.sort(list, function(a, b) return tonumber(a.bitIndex) < tonumber(b.bitIndex) end)
+    local total = 0
+    for _, r in ipairs(list) do total = total + math.max(1, tonumber(r.weight) or 1) end
+    local roll, pick = math.random() * total, list[#list]
+    for _, r in ipairs(list) do
+      roll = roll - math.max(1, tonumber(r.weight) or 1)
+      if roll <= 0 then pick = r; break end
+    end
+    local bi = math.floor(tonumber(pick.bitIndex)) - 1
+    setBits(slot.id, bi, 1, 1)
+    setBits(slot.d, bi, 4, dn)
+  end
+  return slot
+end
+local function ensureShops(shop)
+  shop.tsl = tbl(shop.tsl)
+  for _, s in ipairs(POOL_SHOPS) do
+    if type(shop.tsl[s]) ~= "table" then shop.tsl[s] = rollShop(s) end
+  end
+  return shop
+end
+NetAgent.ensureShops = ensureShops
+
+-- No drop tables ship with the client (ConfigMgr "drop_group" is nil), so a
+-- main-stage win drops one piece from the equipment set of its chapter.
+local DROP_SETS = { 150, 200, 250, 300, 350, 400, 450 }
+local function stageDrop(cfg)
+  local chapter = math.max(1, math.floor(tonumber(cfg and cfg.chapter) or 1))
+  local base = DROP_SETS[math.min(chapter, #DROP_SETS)]
+  local rows = _ENV.ConfigMgr:GetConfig("equipment") or {}
+  local pool = {}
+  for _, r in pairs(rows) do
+    local id = type(r) == "table" and tonumber(r.id)
+    if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1 then pool[#pool + 1] = r.name end
+  end
+  table.sort(pool)
+  if #pool == 0 then return nil end
+  return { id = "gift_equip", count = 1, args = pool[math.random(#pool)] }
+end
+
+-- Stage stars: one per met starConditions entry (victory, duration <= param
+-- seconds, deaths < param revives). ADV.star keeps 2 bits per stage index
+-- (adventure_module RECORD_BIT=2, RECORD_COUNT=16).
+local function countStars(cfg, data, deaths)
+  local n = 0
+  for _, c in ipairs(seq(cfg.starConditions)) do
+    local p = tonumber(c.param) or 0
+    if c.id == "victory" then n = n + 1
+    elseif c.id == "duration" then
+      if (tonumber(data.time) or math.huge) <= p then n = n + 1 end
+    elseif c.id == "revive" then
+      if deaths < p then n = n + 1 end
+    else
+      print("[OFFLINE] star condition UNRESOLVED " .. tostring(c.id))
+    end
+  end
+  return math.min(n, 3)
+end
+local function recordStars(words, index, stars)
+  local pos = (index - 1) * 2
+  local w, sh = pos // 32 + 1, pos % 32
+  for i = 1, w do words[i] = words[i] or 0 end
+  local old = (words[w] >> sh) & 3
+  if stars > old then words[w] = (words[w] & ~(3 << sh)) | (stars << sh) end
+  return old
+end
+
+-- Daily sign-in: PLAYER.tst counts signed days, lsd is the last sign date
+-- (player_module CanSign compares GetDateNumber() with lsd); day = tst % 7.
+local function signRow(tst)
+  local cfg = _ENV.ConfigMgr:GetConfig("daily_sign_in") or {}
+  local weeks = #seq(cfg)
+  if weeks == 0 then return nil end
+  local t = math.max(1, tst)
+  local week = (math.ceil(t / 7) - 1) % weeks + 1
+  local day = (t - 1) % 7 + 1
+  return cfgAt(cfgAt(cfg, week), day)
+end
+local function today()
+  local ok, v = pcall(function() return _ENV.GetDateNumber() end)
+  if ok and tonumber(v) then return tonumber(v) end
+  return tonumber(os.date("%Y%m%d"))
+end
+
+-- TECHNOLOGY.tl stores levels by the config's save_group (technology_module
+-- GetTechLevel): n[save_index], one bit in b, or a 4-bit level in b4.
+local function setTechLevel(tl, cfg, level)
+  local si = math.floor(tonumber(cfg.save_index) or 0)
+  if si <= 0 then return false end
+  if cfg.save_group == "normal" then
+    tl.n = tbl(tl.n); tl.n[si] = level
+  elseif cfg.save_group == "bit" then
+    tl.b = tbl(tl.b); setBits(tl.b, si - 1, 1, level > 0 and 1 or 0)
+  elseif cfg.save_group == "bit4" then
+    tl.b4 = tbl(tl.b4); setBits(tl.b4, si - 1, 4, level & 15)
+  else
+    return false
+  end
+  return true
+end
+local function techCost(id, kind)
+  local ok, v = pcall(function() return _ENV.TechnologyModule:GetResearchCost(id, kind) end)
+  return ok and tonumber(v) or nil
+end
+
 local RESPONSES = {
   -- CHECK_SERVER_CONFIG response { result 0 : *DictionaryStr }: no overrides.
   ["BASE.CHECK_SERVER_CONFIG"] = function(data)
@@ -663,7 +890,9 @@ local RESPONSES = {
   ["BATTLE.OVER"] = function(data)
     data = type(data) == "table" and data or {}
     local sync = { BATTLE = moduleDefaults("BATTLE") }
+    local deaths = tonumber(NetAgent.battle and NetAgent.battle.vi and NetAgent.battle.vi.dt) or 0
     NetAgent.battle = nil
+    local stars, starReward, reward = 0, {}, {}
     local names = _ENV.BattleModule and _ENV.BattleModule.BATTLE_RESULT
     local result = data.result
     local won = result == 1 or result == "VICTORY" or (type(names) == "table" and names[result] == "VICTORY")
@@ -697,14 +926,278 @@ local RESPONSES = {
             print("[OFFLINE] tutorial gear " .. ser(got))
           end
         end
+        -- Stars: ADV.star for normal difficulty; star rewards (rewardStarN)
+        -- are granted once, when that star is first earned.
+        if cfg.type == "main" and (tonumber(data.stage_level) or 1) <= 1 then
+          local adv = sync.ADV or moduleState("ADV")
+          adv.star = tbl(adv.star)
+          stars = countStars(cfg, data, deaths)
+          local old = recordStars(adv.star, math.floor(tonumber(cfg.index)), stars)
+          sync.ADV = adv
+          for n = old + 1, stars do
+            local got = grantRewards(rewardEntries(cfg["rewardStar" .. n]), sync)
+            starReward[#starReward + 1] = { star = n, reward = got }
+          end
+          local drop = stageDrop(cfg)
+          if drop then reward = grantRewards({ drop }, sync) end
+          print("[OFFLINE] OVER stars=" .. stars .. " (had " .. old .. ") deaths=" .. deaths
+            .. " starReward=" .. ser(starReward) .. " drop=" .. ser(reward))
+        end
       end
     end
-    return { ret_code = protoCode("SUCCESS", 1), extra_reward = {}, star_reward = {} }, sync
+    return { ret_code = protoCode("SUCCESS", 1), stars = stars, reward = reward,
+      extra_reward = {}, star_reward = starReward }, sync
   end,
   -- GUIDE "gf" is a bit set: guide_module.GetFlag (lua:14-21) tests
   -- gf & (1 << (ConfigMgr:GetFlagIndex(step) - 1)). STEP_FINISH sends
   -- {step}; SET_GUIDE_STEP_LIST sends {step_list}. Their callbacks only
   -- read ret_code and an optional reward, and no reward is granted offline.
+  -- shop_module.RequestPurchase (lua:83-120) checks tph[id] against the
+  -- shop config's dailyLimit and the (discounted) price, then sends
+  -- {id, ad_sig, count}; the callback fires SHOP.PURCHASE.<id> with
+  -- ret_code and reward. Video-priced items are granted without an ad.
+  ["SHOP.PURCHASE"] = function(data)
+    data = tbl(data)
+    local id = tostring(data.id or "")
+    local count = math.max(1, math.floor(tonumber(data.count) or 1))
+    local cfg = _ENV.ConfigMgr:GetShopItemConfig(id)
+    if type(cfg) ~= "table" then return failRes("SHOP.PURCHASE unknown item " .. id) end
+    local shop = ensureShops(moduleState("SHOP"))
+    shop.tph = tbl(shop.tph)
+    local limit = tonumber(cfg.dailyLimit) or 0
+    if limit > 0 and (tonumber(shop.tph[id]) or 0) + count > limit then
+      return failRes("SHOP.PURCHASE daily limit " .. id)
+    end
+    local sync = { SHOP = shop }
+    local price = tbl(cfg.price)
+    local pid = tostring(price.id or "")
+    if pid == "rmb" then
+      return failRes("SHOP.PURCHASE " .. id .. " is a real-money item; no billing offline")
+    end
+    if pid ~= "video" and pid ~= "" then
+      local disc = 100
+      pcall(function()
+        local v = _ENV.ShopModule:GetDiscount(cfg.shop, cfg.bitIndex)
+        if tonumber(v) then disc = tonumber(v) end
+      end)
+      local cost = math.floor((tonumber(price.count) or 0) * count * disc / 100)
+      local paid, short = spend(sync, { [pid] = cost })
+      if not paid then return failRes("SHOP.PURCHASE " .. id .. " short of " .. tostring(short)) end
+    end
+    shop.tph[id] = (tonumber(shop.tph[id]) or 0) + count
+    local entries = {}
+    for _ = 1, count do
+      for _, e in ipairs(rewardEntries(seq(cfg.reward))) do entries[#entries + 1] = e end
+    end
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] SHOP.PURCHASE " .. id .. " x" .. count .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  -- shop_module.RefreshShop sends {type, ad_sig}; tsl[type].c counts refreshes.
+  ["SHOP.REFRESH_SHOP"] = function(data)
+    data = tbl(data)
+    local t = tostring(data.type or "")
+    local shop = ensureShops(moduleState("SHOP"))
+    local c = type(shop.tsl[t]) == "table" and (tonumber(shop.tsl[t].c) or 0) or 0
+    shop.tsl[t] = rollShop(t)
+    shop.tsl[t].c = c + 1
+    return okRes(), { SHOP = shop }
+  end,
+  -- box_module.RequestOpenBox (lua:83-115): price = GetBoxConfig(box_id).price
+  -- x count (or an ad); the callback fires BOX.OPEN_RESULT with reward.
+  ["SHOP.OPEN_BOX"] = function(data)
+    data = tbl(data)
+    local boxId = tostring(data.box_id or "")
+    local count = math.max(1, math.floor(tonumber(data.count) or 1))
+    local cfg = _ENV.ConfigMgr:GetBoxConfig(boxId)
+    if type(cfg) ~= "table" then return failRes("SHOP.OPEN_BOX unknown box " .. boxId) end
+    local sync = {}
+    local price = tbl(cfg.price)
+    if data.ad_sig == nil and price.id ~= nil and price.id ~= "video" then
+      local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * count })
+      if not paid then return failRes("SHOP.OPEN_BOX " .. boxId .. " short of " .. tostring(short)) end
+    end
+    local adv = moduleState("ADV")
+    local entries = {}
+    for _ = 1, count do
+      local e = stageDrop({ chapter = math.max(1, math.ceil(((tonumber(adv.stage) or 1) - 1) / 5)) })
+      if e then entries[#entries + 1] = e end
+    end
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] OPEN_BOX " .. boxId .. " x" .. count .. " reward=" .. ser(reward))
+    return okRes({ reward = reward, result = 0 }), sync
+  end,
+
+  -- equip_module.RequestEnhance / RequestAscend send {id = equipment uid,
+  -- target}; the cost is the client's own GetEnhanceCost / GetAscendCost
+  -- ({[item_id] = count}). Level is base & 255, stars (base >> 8) & 255.
+  ["EQUIP.ENHANCE"] = function(data)
+    data = tbl(data)
+    local uid = tostring(math.floor(tonumber(data.id) or 0))
+    local target = tonumber(data.target)
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local e = eq.el[uid]
+    if type(e) ~= "table" then return failRes("EQUIP.ENHANCE no equipment " .. uid) end
+    local base = math.floor(tonumber(e[1]) or 0)
+    -- equip_module.GetEnhanceCost: a nil target means the next level.
+    target = target and math.floor(target) or (base & 255) + 1
+    if target <= (base & 255) or target > 255 then return failRes("EQUIP.ENHANCE bad target " .. target) end
+    local ok, flag, costs = pcall(function() return _ENV.EquipModule:GetEnhanceCost(uid, target) end)
+    if not ok or flag ~= 1 or type(costs) ~= "table" then
+      return failRes("EQUIP.ENHANCE cost unavailable " .. tostring(costs or flag))
+    end
+    local sync = { EQUIP = eq }
+    local paid, short = spend(sync, costs)
+    if not paid then return failRes("EQUIP.ENHANCE short of " .. tostring(short)) end
+    e[1] = (base & ~255) | target
+    print("[OFFLINE] EQUIP.ENHANCE " .. uid .. " -> " .. target .. " cost=" .. ser(costs))
+    return okRes(), sync
+  end,
+  ["EQUIP.ASCEND"] = function(data)
+    data = tbl(data)
+    local uid = tostring(math.floor(tonumber(data.id) or 0))
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local e = eq.el[uid]
+    if type(e) ~= "table" then return failRes("EQUIP.ASCEND no equipment " .. uid) end
+    local base = math.floor(tonumber(e[1]) or 0)
+    local ok, flag, costs = pcall(function() return _ENV.EquipModule:GetAscendCost(uid) end)
+    if not ok or flag ~= 1 or type(costs) ~= "table" then
+      return failRes("EQUIP.ASCEND cost unavailable " .. tostring(costs or flag))
+    end
+    local sync = { EQUIP = eq }
+    local paid, short = spend(sync, costs)
+    if not paid then return failRes("EQUIP.ASCEND short of " .. tostring(short)) end
+    local star = ((base >> 8) & 255) + 1
+    e[1] = (base & ~(255 << 8)) | (star << 8)
+    print("[OFFLINE] EQUIP.ASCEND " .. uid .. " -> star " .. star .. " cost=" .. ser(costs))
+    return okRes(), sync
+  end,
+  ["EQUIP.SET_NEW"] = function(data)
+    data = tbl(data)
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local e = eq.el[tostring(math.floor(tonumber(data.id) or 0))]
+    if type(e) ~= "table" then return okRes({ result = false }) end
+    local base = math.floor(tonumber(e[1]) or 0)
+    if (tonumber(data.is_new) or 0) ~= 0 then e[1] = base | EQUIP_NEW_MASK else e[1] = base & ~EQUIP_NEW_MASK end
+    return okRes({ result = true }), { EQUIP = eq }
+  end,
+
+  -- technology_module (lua:268-347): START_RESEARCH {id} puts
+  -- ct[group] = {id, time = finish}; UPGRADE {id} after that time and
+  -- QUICK_UPGRADE {id} for gems raise the level; STOP_RESEARCH {group}
+  -- refunds. Costs and durations come from the module's GetResearchCost.
+  ["TECHNOLOGY.START_RESEARCH"] = function(data)
+    data = tbl(data)
+    local id = tostring(data.id or "")
+    local cfg = _ENV.ConfigMgr:GetTechnologyConfig(id)
+    if type(cfg) ~= "table" then return failRes("TECHNOLOGY.START_RESEARCH unknown " .. id) end
+    local tech = moduleState("TECHNOLOGY")
+    tech.ct = tbl(tech.ct)
+    if tech.ct[cfg.group] then return failRes("TECHNOLOGY.START_RESEARCH group busy " .. tostring(cfg.group)) end
+    local level = tonumber(_ENV.TechnologyModule:GetTechLevel(id)) or 0
+    if level >= (tonumber(cfg.maxLevel) or 1) then return failRes("TECHNOLOGY.START_RESEARCH max level " .. id) end
+    local costType = tostring(cfg.cost_type or "coin")
+    local cost = techCost(id, "coin") or 0
+    local secs = techCost(id, "time") or 0
+    local sync = { TECHNOLOGY = tech }
+    local paid, short = spend(sync, { [costType] = cost })
+    if not paid then return failRes("TECHNOLOGY.START_RESEARCH short of " .. tostring(short)) end
+    tech.ct[cfg.group] = { id = id, time = os.time() + math.max(0, math.floor(secs)) }
+    print("[OFFLINE] TECH start " .. id .. " cost=" .. cost .. " secs=" .. secs)
+    return okRes(), sync
+  end,
+  ["TECHNOLOGY.UPGRADE"] = function(data)
+    data = tbl(data)
+    local id = tostring(data.id or "")
+    local cfg = _ENV.ConfigMgr:GetTechnologyConfig(id)
+    local tech = moduleState("TECHNOLOGY")
+    tech.ct = tbl(tech.ct)
+    local cur = type(cfg) == "table" and tech.ct[cfg.group]
+    if type(cur) ~= "table" or cur.id ~= id then return failRes("TECHNOLOGY.UPGRADE not researching " .. id) end
+    if (tonumber(cur.time) or 0) > os.time() + 2 then return failRes("TECHNOLOGY.UPGRADE not finished " .. id) end
+    tech.tl = tbl(tech.tl)
+    local level = (tonumber(_ENV.TechnologyModule:GetTechLevel(id)) or 0) + 1
+    if not setTechLevel(tech.tl, cfg, level) then return failRes("TECHNOLOGY.UPGRADE save_group " .. tostring(cfg.save_group)) end
+    tech.ct[cfg.group] = nil
+    return okRes(), { TECHNOLOGY = tech }
+  end,
+  ["TECHNOLOGY.QUICK_UPGRADE"] = function(data)
+    data = tbl(data)
+    local id = tostring(data.id or "")
+    local cfg = _ENV.ConfigMgr:GetTechnologyConfig(id)
+    local tech = moduleState("TECHNOLOGY")
+    tech.ct = tbl(tech.ct)
+    local cur = type(cfg) == "table" and tech.ct[cfg.group]
+    if type(cur) ~= "table" or cur.id ~= id then return failRes("TECHNOLOGY.QUICK_UPGRADE not researching " .. id) end
+    local sync = { TECHNOLOGY = tech }
+    local gemId = (_ENV.GameDef.ITEM_ID or {}).GEM or "gem"
+    local paid, short = spend(sync, { [gemId] = techCost(id, "gem") or 0 })
+    if not paid then return failRes("TECHNOLOGY.QUICK_UPGRADE short of " .. tostring(short)) end
+    tech.tl = tbl(tech.tl)
+    local level = (tonumber(_ENV.TechnologyModule:GetTechLevel(id)) or 0) + 1
+    if not setTechLevel(tech.tl, cfg, level) then return failRes("TECHNOLOGY.QUICK_UPGRADE save_group " .. tostring(cfg.save_group)) end
+    tech.ct[cfg.group] = nil
+    return okRes(), sync
+  end,
+  ["TECHNOLOGY.STOP_RESEARCH"] = function(data)
+    data = tbl(data)
+    local tech = moduleState("TECHNOLOGY")
+    tech.ct = tbl(tech.ct)
+    local cur = tech.ct[data.group]
+    if type(cur) ~= "table" then return failRes("TECHNOLOGY.STOP_RESEARCH idle " .. tostring(data.group)) end
+    local cfg = _ENV.ConfigMgr:GetTechnologyConfig(cur.id) or {}
+    local costType = tostring(cfg.cost_type or "coin")
+    tech.ct[data.group] = nil
+    local sync = { TECHNOLOGY = tech }
+    local reward = grantRewards({ { id = costType, count = techCost(cur.id, "coin") or 0 } }, sync)
+    return okRes({ reward = reward }), sync
+  end,
+
+  -- player_module.RequestSign / RequestDailyGift (lua:282-316).
+  ["PLAYER.SIGN"] = function()
+    local p = moduleState("PLAYER")
+    local d = today()
+    if (tonumber(p.lsd) or 0) >= d then return failRes("PLAYER.SIGN already signed " .. d) end
+    p.tst = (tonumber(p.tst) or 0) + 1
+    p.lsd = d
+    local row = signRow(p.tst)
+    local sync = { PLAYER = p }
+    local reward = grantRewards(rewardEntries(seq(row and row.signReward)), sync)
+    print("[OFFLINE] SIGN day " .. p.tst .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  ["PLAYER.DAILY_GIFT"] = function()
+    local p = moduleState("PLAYER")
+    if (tonumber(p.dg) or 0) == 1 then return failRes("PLAYER.DAILY_GIFT already claimed") end
+    p.dg = 1
+    local row = signRow(tonumber(p.tst) or 1)
+    local sync = { PLAYER = p }
+    local reward = grantRewards(rewardEntries(seq(row and row.dailyGift)), sync)
+    print("[OFFLINE] DAILY_GIFT reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  ["PLAYER.DAILY_RESET"] = function()
+    local p = moduleState("PLAYER")
+    p.dg = 0
+    local shop = moduleState("SHOP")
+    shop.tph = {}
+    shop.tsl = {}
+    ensureShops(shop)
+    return okRes(), { PLAYER = p, SHOP = shop }
+  end,
+
+  -- Offline there is no ad network. GM.f carries GameDef.FLAG.NO_AD, which
+  -- GMModule.IsNoADForCS reports to AdRewardMgr; these answer the client's
+  -- own ad bookkeeping if it still asks.
+  ["AD.REQUEST"] = function()
+    return okRes({ time = os.time(), token = 1 })
+  end,
+  ["AD.VERIFY"] = function()
+    return okRes()
+  end,
   ["GUIDE.STEP_FINISH"] = function(data)
     data = type(data) == "table" and data or {}
     return { ret_code = protoCode("SUCCESS", 1) }, { GUIDE = setGuideFlags({ data.step }) }
