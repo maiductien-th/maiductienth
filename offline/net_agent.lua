@@ -499,7 +499,9 @@ local function grantRewards(entries, sync)
             [2] = 1, [3] = {}, [5] = 0 }
           eq.euid = euid + 1
         end
-        shown[#shown + 1] = { id = tostring(e.args), count = n }
+        -- Shown as the gift_equip item (SpecEquipment) with the piece in args;
+        -- equipment names have no ItemConfig row of their own.
+        shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args) }
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
       end
@@ -702,14 +704,10 @@ local function stageDrop(cfg)
   local chapter = math.max(1, math.floor(tonumber(cfg and cfg.chapter) or 1))
   local base = DROP_SETS[math.min(chapter, #DROP_SETS)]
   local rows = _ENV.ConfigMgr:GetConfig("equipment") or {}
-  local items = _ENV.ConfigMgr:GetConfig("item") or {}
   local pool = {}
   for _, r in pairs(rows) do
     local id = type(r) == "table" and tonumber(r.id)
-    -- Some valid equipment rows have no item row (e.g. Survivor_Boots); the
-    -- client cannot show those, so only drop pieces with an ItemConfig.
-    if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1
-        and items[r.name] ~= nil then
+    if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1 then
       pool[#pool + 1] = r.name
     end
   end
