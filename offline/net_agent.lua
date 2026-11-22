@@ -214,6 +214,24 @@ end
 -- {[ModuleDef.SYNC index] = data index-keyed with that module's key_enum},
 -- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
 -- before the request callback runs (stock net_agent.lua:656).
+local function dumpCfg(tag, cfg)
+  if type(cfg) ~= "table" then
+    print("[OFFLINE] cfg " .. tag .. " = " .. tostring(cfg))
+    return
+  end
+  local parts = {}
+  for k, v in pairs(cfg) do
+    local vs = v
+    if type(v) == "table" then
+      local inner = {}
+      for k2, v2 in pairs(v) do inner[#inner + 1] = tostring(k2) .. ":" .. tostring(v2) end
+      vs = "{" .. table.concat(inner, ",") .. "}"
+    end
+    parts[#parts + 1] = tostring(k) .. "=" .. tostring(vs)
+  end
+  print("[OFFLINE] cfg " .. tag .. " {" .. table.concat(parts, ";") .. "}")
+end
+
 local function fireSync(agent, partials)
   if type(partials) ~= "table" then return end
   local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
@@ -224,7 +242,21 @@ local function fireSync(agent, partials)
       if NetAgent.state then NetAgent.state[m.name] = deepcopy(part) end
       local mod = mgr and mgr:GetModuleByIndex(i)
       local en = mod and mod.key_enum
-      local ix = encode(wire(m.name, part), en)
+      local ix = encode(part, en)
+      if ix == nil and type(m.data) == "table" then
+        -- Keys the module never declared (e.g. GUIDE.st) have no wire index;
+        -- they stay in the saved state and are resent with role_data on login.
+        local known, dropped = {}, {}
+        for k, v in pairs(part) do
+          if m.data[k] ~= nil then known[k] = v else dropped[#dropped + 1] = tostring(k) end
+        end
+        if #dropped > 0 then
+          ix = encode(known, en)
+          if ix ~= nil then
+            print("[OFFLINE] sync " .. tostring(m.name) .. " sent without undeclared keys=" .. table.concat(dropped, ","))
+          end
+        end
+      end
       if ix == nil then
         local ks = {}
         for k in pairs(part) do ks[#ks + 1] = tostring(k) end
@@ -301,6 +333,123 @@ local function setGuideFlags(steps)
   return g
 end
 
+
+-- Rewards. Config reward strings are "id|count[|arg];..." (realitem
+-- UseReward, aim reward). Economic items live in ECO.d; timed items (boxes)
+-- in ECO.t as {packed, acquire_time} with packed = real_id << 7 | n, parsed by
+-- economic_module ParseItemValue; "gift_equip|n|<equipment key>" grants
+-- equipment into EQUIP.el, keyed by tostring(euid), with DataEnum
+-- "equipment" keys (base_value=1, distribution=2, attr_list=3, uuid=4,
+-- link=5) and base_value = template_id << 16 | level << 8 | stars | NEW_MASK
+-- (equip_module ParseEquipBaseValue).
+local EQUIP_NEW_MASK = 1073741824
+
+local function realIdOf(itemId)
+  local cm = _ENV.ConfigMgr
+  for rid = 1, 511 do
+    local ok, id = pcall(cm.GetItemIdByRealItemId, cm, rid)
+    if ok and id == itemId then return rid end
+  end
+  return nil
+end
+
+local function equipTemplateId(key)
+  local cfgs = _ENV.ConfigMgr:GetConfig("equipment")
+  if type(cfgs) ~= "table" then return nil end
+  for k, v in pairs(cfgs) do
+    if type(v) == "table" then
+      for _, f in pairs(v) do
+        if f == key then
+          local id = tonumber(v.id) or tonumber(k)
+          if id then return math.floor(id) end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+local function rewardEntries(r)
+  local out = {}
+  if type(r) == "string" then
+    for part in r:gmatch("[^;]+") do
+      local f = {}
+      for x in part:gmatch("[^|]+") do f[#f + 1] = x end
+      if f[1] then out[#out + 1] = { id = f[1], count = tonumber(f[2]) or 1, args = f[3] } end
+    end
+  elseif type(r) == "table" then
+    if r.id ~= nil or type(r[1]) == "string" then r = { r } end
+    for _, e in ipairs(r) do
+      if type(e) == "string" then
+        for _, x in ipairs(rewardEntries(e)) do out[#out + 1] = x end
+      elseif type(e) == "table" then
+        local id = e.id or e[1]
+        if id ~= nil then
+          out[#out + 1] = { id = tostring(id), count = tonumber(e.count or e[2]) or 1,
+            args = e.args or e.param or e[3] }
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function configUseReward(itemId)
+  local rid = realIdOf(itemId)
+  local rows = _ENV.ConfigMgr:GetConfig("realitem")
+  if not rid or type(rows) ~= "table" then return nil end
+  local row = rows[rid] or rows[tostring(rid)]
+  return type(row) == "table" and row.UseReward or nil
+end
+
+local function grantRewards(entries, sync)
+  local items = _ENV.ConfigMgr:GetConfig("item") or {}
+  local shown = {}
+  for _, e in ipairs(entries) do
+    local id, n = e.id, math.floor(e.count or 1)
+    local cfg = items[id]
+    if id == "gift_equip" then
+      local tid = equipTemplateId(e.args)
+      if tid then
+        sync.EQUIP = sync.EQUIP or moduleState("EQUIP")
+        local eq = sync.EQUIP
+        eq.el = type(eq.el) == "table" and eq.el or {}
+        for _ = 1, n do
+          local euid = math.floor(tonumber(eq.euid) or 1)
+          eq.el[tostring(euid)] = { [1] = (tid << 16) | (1 << 8) | 1 | EQUIP_NEW_MASK,
+            [2] = 1, [3] = {}, [5] = 0 }
+          eq.euid = euid + 1
+        end
+        shown[#shown + 1] = { id = tostring(e.args), count = n }
+      else
+        print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
+      end
+    elseif type(cfg) == "table" and cfg.type == "Economic" then
+      sync.ECO = sync.ECO or moduleState("ECO")
+      local eco = sync.ECO
+      eco.d = type(eco.d) == "table" and eco.d or {}
+      eco.d[id] = (tonumber(eco.d[id]) or 0) + n
+      shown[#shown + 1] = { id = id, count = n }
+    else
+      local rid = realIdOf(id)
+      if rid then
+        sync.ECO = sync.ECO or moduleState("ECO")
+        local eco = sync.ECO
+        local t = {}
+        for _, x in ipairs(type(eco.t) == "table" and eco.t or {}) do
+          if type(x) == "table" and (tonumber(x[1]) or 0) ~= 0 then t[#t + 1] = x end
+        end
+        for _ = 1, n do t[#t + 1] = { [1] = (rid << 7) | 1, [2] = os.time() } end
+        eco.t = t
+        shown[#shown + 1] = { id = id, count = n }
+      else
+        print("[OFFLINE] reward UNRESOLVED item " .. tostring(id) .. " x" .. tostring(n))
+      end
+    end
+  end
+  return shown
+end
+
 local function protoCode(name, fallback)
   local gd = _ENV.GameDef
   if type(gd) == "table" and type(gd.PROTO_CODE) == "table" and gd.PROTO_CODE[name] ~= nil then
@@ -340,8 +489,86 @@ local RESPONSES = {
   -- SERVER_PATCH response { version, patch, config_version, configs }:
   -- echo the client's current versions, i.e. "nothing to patch".
   -- proto_def BASE.CUSTOM_UPDATE 5: response { ret_code 0 : integer }
-  ["BASE.CUSTOM_UPDATE"] = function()
+
+  -- custom_data_module.lua:59-64 sends data = {{key=, value=}, ...}; the
+  -- client keeps CUSTOM.d as key -> value (equip plans live here) and lut.
+  ["BASE.CUSTOM_UPDATE"] = function(data)
+    data = type(data) == "table" and data or {}
+    local st = NetAgent.state or initState()
+    local c = type(st.CUSTOM) == "table" and st.CUSTOM or {}
+    c.d = type(c.d) == "table" and c.d or {}
+    for _, kv in ipairs(type(data.data) == "table" and data.data or {}) do
+      if type(kv) == "table" and kv.key ~= nil then c.d[kv.key] = kv.value end
+    end
+    c.lut = os.time()
+    st.CUSTOM = c
+    saveState()
     return { ret_code = protoCode("SUCCESS", 1) }
+  end,
+
+  -- aim_module.lua:161-170: AIM.CLAIM_REWARD {index}; callback needs
+  -- ret_code and reward. ca = current aim, cav = its progress, cr/er are
+  -- 32-bit claimed-record words read by getRecord (lua:149-159).
+  ["AIM.CLAIM_REWARD"] = function(data)
+    data = type(data) == "table" and data or {}
+    local index = math.floor(tonumber(data.index) or 0)
+    local cfg = index > 0 and _ENV.ConfigMgr:GetAimConfig(index)
+    if type(cfg) ~= "table" then
+      print("[OFFLINE] AIM.CLAIM_REWARD unknown index " .. tostring(data.index))
+      return { ret_code = protoCode("FAIL", 0) }
+    end
+    local sync = {}
+    local aim = moduleState("AIM")
+    aim.cr = type(aim.cr) == "table" and aim.cr or {}
+    local w = math.ceil(index / 32)
+    for i = 1, w do aim.cr[i] = aim.cr[i] or 0 end
+    aim.cr[w] = aim.cr[w] | (1 << ((index - 1) % 32))
+    if (tonumber(aim.ca) or 1) == index then
+      aim.ca = index + 1
+      aim.cav = 0
+    end
+    sync.AIM = aim
+    local reward = grantRewards(rewardEntries(cfg.reward), sync)
+    print("[OFFLINE] AIM claim " .. index .. " reward=" .. ser(reward))
+    return { ret_code = protoCode("SUCCESS", 1), reward = reward }, sync
+  end,
+
+  -- economic_module.lua:300-313: ITEM.USE {item_id, item_index, use_count};
+  -- the item's realitem UseReward is granted.
+  ["ITEM.USE"] = function(data)
+    data = type(data) == "table" and data or {}
+    local rid = realIdOf(data.item_id)
+    local rcfg = rid and _ENV.ConfigMgr:GetRealItemConfig(rid)
+    if type(rcfg) ~= "table" then
+      print("[OFFLINE] ITEM.USE unknown item " .. tostring(data.item_id))
+      return { ret_code = protoCode("FAIL", 0) }
+    end
+    local sync = { ECO = moduleState("ECO") }
+    local eco = sync.ECO
+    local t, removed = {}, 0
+    local want = math.max(1, math.floor(tonumber(data.use_count) or 1))
+    for _, x in ipairs(type(eco.t) == "table" and eco.t or {}) do
+      local v = type(x) == "table" and (tonumber(x[1]) or 0) or 0
+      if v ~= 0 then
+        if removed < want and ((v >> 7) & 511) == rid then
+          removed = removed + 1
+        else
+          t[#t + 1] = x
+        end
+      end
+    end
+    if removed == 0 then
+      print("[OFFLINE] ITEM.USE item not owned " .. tostring(data.item_id))
+      return { ret_code = protoCode("FAIL", 0) }
+    end
+    eco.t = t
+    local entries = {}
+    for _ = 1, removed do
+      for _, e in ipairs(rewardEntries(rcfg.UseReward)) do entries[#entries + 1] = e end
+    end
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ITEM.USE " .. tostring(data.item_id) .. " x" .. removed .. " reward=" .. ser(reward))
+    return { ret_code = protoCode("SUCCESS", 1), reward = reward }, sync
   end,
 
   -- BATTLE module state. A sync replaces the module's data, so every BATTLE
@@ -361,6 +588,10 @@ local RESPONSES = {
     st.room = 1
     st.time = 0
     NetAgent.battle = st
+    pcall(function()
+      dumpCfg("stage " .. stage, _ENV.ConfigMgr:GetStageConfig(stage))
+      dumpCfg("room " .. st.rid, _ENV.ConfigMgr:GetRoomConfig(st.rid))
+    end)
     return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
   end,
   -- BATTLE.ENTER_ROOM (battle_module.lua:238-272) sends stage_id, the
@@ -377,6 +608,7 @@ local RESPONSES = {
     st.time = math.floor(tonumber(data.time) or st.time or 0)
     addChosenTco(st, data.choose_tco)
     NetAgent.battle = st
+    pcall(function() dumpCfg("room " .. st.rid, _ENV.ConfigMgr:GetRoomConfig(st.rid)) end)
     return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
   end,
   -- BATTLE.CHOOSE_TCO (battle_module_tco.lua:636-675) sends {id = tco
@@ -408,7 +640,7 @@ local RESPONSES = {
     local names = _ENV.BattleModule and _ENV.BattleModule.BATTLE_RESULT
     local result = data.result
     local won = result == 1 or result == "VICTORY" or (type(names) == "table" and names[result] == "VICTORY")
-    print("[OFFLINE] OVER stage=" .. tostring(data.stage_id) .. " result=" .. tostring(result) .. " won=" .. tostring(won) .. " coin=" .. tostring(data.coin))
+        print("[OFFLINE] OVER stage=" .. tostring(data.stage_id) .. " result=" .. tostring(result) .. " won=" .. tostring(won) .. " coin=" .. tostring(data.coin))
     if won then
       local eco = moduleState("ECO")
       eco.d = type(eco.d) == "table" and eco.d or {}
@@ -423,6 +655,20 @@ local RESPONSES = {
           adv.stage = nextIndex
           adv.room = -1
           sync.ADV = adv
+          if nextIndex == 2 then
+            -- First clear of the tutorial stage. The guide that runs next
+            -- (guide_battle_over -> guide_equip_0, "A Weapon and a ULT Disk
+            -- ... Try them on!") equips both slots and needs both items
+            -- owned. They are the gift_equip entries of the rookie box
+            -- box1_1's realitem UseReward; that config row is read here.
+            local box = {}
+            for _, e in ipairs(rewardEntries(configUseReward("box1_1"))) do
+              if e.id == "gift_equip" then box[#box + 1] = e end
+            end
+            if #box == 0 then print("[OFFLINE] UNRESOLVED box1_1 UseReward") end
+            local got = grantRewards(box, sync)
+            print("[OFFLINE] tutorial gear " .. ser(got))
+          end
         end
       end
     end
