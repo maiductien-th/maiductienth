@@ -137,7 +137,9 @@ local function fireSync(agent, partials)
       local en = mod and mod.key_enum
       local ix = encode(part, en)
       if ix == nil then
-        print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped")
+        local ks = {}
+        for k in pairs(part) do ks[#ks + 1] = tostring(k) end
+        print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped keys=" .. table.concat(ks, ","))
       else
         out[i] = ix; n = n + 1
       end
@@ -147,6 +149,27 @@ local function fireSync(agent, partials)
   local literal = ser(out)
   print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
   _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
+end
+
+local function deepcopy(v)
+  if type(v) ~= "table" then return v end
+  local o = {}
+  for k, x in pairs(v) do o[k] = deepcopy(x) end
+  return o
+end
+local function moduleDefaults(name)
+  for _, m in ipairs(_ENV.ModuleDef.SYNC) do
+    if m.name == name then return deepcopy(m.data or {}) end
+  end
+  return {}
+end
+local function addChosenTco(st, list)
+  if type(list) ~= "table" then return end
+  for _, e in ipairs(list) do
+    if type(e) == "table" and e.key ~= nil then
+      st.vi.ctl[e.key] = (st.vi.ctl[e.key] or 0) + (tonumber(e.value) or 0)
+    end
+  end
 end
 
 local function protoCode(name, fallback)
@@ -192,29 +215,46 @@ local RESPONSES = {
     return { ret_code = protoCode("SUCCESS", 1) }
   end,
 
-  -- BATTLE.START (stage_id, stage_level, equips, params). The callback
-  -- (battle_module.lua:405-409) reads BATTLE data "stage" and "rid", and the
-  -- battle scene resolves rid as a RoomConfig id (RoomMgr.LoadRoom logs
-  -- "No config id: RoomConfig <rid>" otherwise). The server's answer is a
-  -- BATTLE sync: stage, the first room of the stage's roomList
-  -- (ConfigMgr:GetRoomId(stage, 1)), room = rooms entered so far, time.
+  -- BATTLE module state. A sync replaces the module's data, so every BATTLE
+  -- sync carries the whole state, seeded from the module's own defaults in
+  -- ModuleDef.SYNC. Utils.Key2Index only maps top-level keys, so state lives
+  -- under the module's own keys. battle_module.lua:213-236,274-276 reads
+  -- data "vi" (server battle info) and its "ctl" = {[tco key] = count
+  -- already reported}; the client reports new picks as
+  -- choose_tco = {{key=, value=}, ...} on ENTER_ROOM and OVER.
   ["BATTLE.START"] = function(data)
     data = type(data) == "table" and data or {}
     local stage = tostring(data.stage_id or "")
-    return { ret_code = protoCode("SUCCESS", 1) }, {
-      BATTLE = { stage = stage, rid = _ENV.ConfigMgr:GetRoomId(stage, 1) or "", room = 1, time = 0 },
-    }
+    local st = moduleDefaults("BATTLE")
+    st.vi = { ctl = {} }
+    st.stage = stage
+    st.rid = _ENV.ConfigMgr:GetRoomId(stage, 1) or ""
+    st.room = 1
+    st.time = 0
+    NetAgent.battle = st
+    return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
   end,
   -- BATTLE.ENTER_ROOM (battle_module.lua:238-272) sends stage_id, the
-  -- 1-based room_index it is entering, and the elapsed time; it only sends
-  -- when room_index > BATTLE.room and its callback reads BATTLE "rid".
+  -- 1-based room_index it is entering, the elapsed time and choose_tco; it
+  -- only sends when room_index > BATTLE.room and its callback reads "rid".
   ["BATTLE.ENTER_ROOM"] = function(data)
     data = type(data) == "table" and data or {}
-    local stage = tostring(data.stage_id or "")
-    local index = tonumber(data.room_index) or 1
-    return { ret_code = protoCode("SUCCESS", 1) }, {
-      BATTLE = { stage = stage, rid = _ENV.ConfigMgr:GetRoomId(stage, index) or "", room = index, time = tonumber(data.time) or 0 },
-    }
+    local st = NetAgent.battle or moduleDefaults("BATTLE")
+    st.vi = type(st.vi) == "table" and st.vi or {}
+    st.vi.ctl = type(st.vi.ctl) == "table" and st.vi.ctl or {}
+    st.stage = tostring(data.stage_id or st.stage or "")
+    st.room = math.floor(tonumber(data.room_index) or ((st.room or 0) + 1))
+    st.rid = _ENV.ConfigMgr:GetRoomId(st.stage, st.room) or ""
+    st.time = math.floor(tonumber(data.time) or st.time or 0)
+    addChosenTco(st, data.choose_tco)
+    NetAgent.battle = st
+    return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
+  end,
+  -- BATTLE.CHOOSE_TCO (battle_module_tco.lua:636-675) sends {id = tco
+  -- server_id}; the callback only checks ret_code == SUCCESS and reads an
+  -- optional count (defaults to 1).
+  ["BATTLE.CHOOSE_TCO"] = function(data)
+    return { ret_code = protoCode("SUCCESS", 1), count = 1 }
   end,
 
   ["BASE.SERVER_PATCH"] = function(data)
