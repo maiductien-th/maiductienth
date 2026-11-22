@@ -335,8 +335,50 @@ local function rewardEntries(r)
   return out
 end
 
+-- realitem UseReward as shipped in the APK's CSV config table (assets/config.ab).
+-- The zlib table in scg.ab that ConfigMgr loads omits the tutorial ULT disc from box1_1,
+-- while the tutorial dialogue and guide_equip_6/7 require a second equipment item.
+local REALITEM_USE_REWARD = {
+  [1] = "coin|500;stone|5;gift_equip|1|Equipment_Weapon_Frontline_Tachi;gift_equip|1|Equipment_Disc_SpaceJudgement_A;box1_2|1;",
+  [2] = "coin|1000;stone|5;gift_equip|1|Equipment_Armor_Frontline_Uniform;gift_equip|1|Equipment_Ornament_Frontline_Earrings;box1_3|1;",
+  [3] = "coin|2000;stone|10;gift_equip|1|Equipment_Helmet_Frontline_Beret;gift_equip|1|Equipment_Shoes_Frontline_Shoes;box1_4|1;",
+  [4] = "coin|3000;stone|10;key_common|3;box1_5|1;",
+  [5] = "coin|4000;stone|10;key_common|2;key_adv|1;box1_6|1;",
+  [6] = "coin|5000;stone|10;randomPurpleWeapon|1",
+  [20] = "coin|2000;gem|10;box2_2|1;",
+  [21] = "coin|4000;gem|10;box2_3|1;",
+  [22] = "coin|6000;gem|10;box2_4|1;",
+  [23] = "coin|8000;gem|10;box2_5|1;",
+  [24] = "coin|10000;gem|20;key_adv|3;",
+  [11] = "newBoxWeapon|1;box_new_2|1;",
+  [12] = "newBoxArmor|1;box_new_3|1;",
+  [13] = "newBoxHelmet|1;box_new_4|1;",
+  [14] = "newBoxShoes|1;box_new_5|1;",
+  [15] = "newBoxOrnament|1;box_new_6|1;",
+  [16] = "newBoxDisk|1;",
+  [31] = "box_weekly_reward|1;box_weekly_2|1;",
+  [32] = "box_weekly_reward|1;box_weekly_3|1;",
+  [33] = "box_weekly_reward|1;box_weekly_4|1;",
+  [34] = "box_weekly_reward|1;box_weekly_5|1;",
+  [35] = "box_weekly_reward|1;box_weekly_6|1;",
+  [36] = "box_weekly_reward|1;box_weekly_7|1;",
+  [37] = "box_weekly_reward|1",
+  [100] = "randomPet|1",
+  [101] = "pet|1|1",
+  [102] = "randomPet|1",
+  [200] = "_ec_50|3",
+  [201] = "_ec_50|10",
+  [210] = "_es_50|3",
+  [211] = "_es_50|10",
+  [221] = "_epx_50|3",
+  [222] = "_epx_50|10",
+}
+
 local function configUseReward(itemId)
   local rid = realIdOf(itemId)
+  if rid and REALITEM_USE_REWARD[tonumber(rid)] then
+    return REALITEM_USE_REWARD[tonumber(rid)]
+  end
   local rows = _ENV.ConfigMgr:GetConfig("realitem")
   if not rid or type(rows) ~= "table" then return nil end
   local row = rows[rid] or rows[tostring(rid)]
