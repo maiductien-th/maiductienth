@@ -67,10 +67,17 @@ $ grep -n -B1 'SignInWithCredentialAsync(Credential\|get_DefaultInstance()\|Sign
 67468:	public Task<GoogleSignInUser> SignIn() { }
 ```
 
-The enclosing declarations are `public sealed class FirebaseAuth : IDisposable`
-(dump.cs:639258) and `public class GoogleSignIn` (dump.cs:67439). These classes
-are absent from the Phase 2 dump survey because that survey greps for login and
-currency patterns, not SDK types; the addresses above come from the dump directly.
+The enclosing class declarations, from the dump:
+
+```
+$ grep -n 'public sealed class FirebaseAuth : IDisposable\|^public class GoogleSignIn //' out/recovered/dump.cs
+67439:public class GoogleSignIn // TypeDefIndex: 1844
+639258:public sealed class FirebaseAuth : IDisposable // TypeDefIndex: 11890
+```
+
+These classes are absent from the Phase 2 dump survey because that survey greps
+for login and currency patterns, not SDK types; the addresses above come from the
+dump directly.
 
 These are calls into provider SDKs. Whether a given one performs network I/O happens inside the SDK
 and is not observable from these call sites.
