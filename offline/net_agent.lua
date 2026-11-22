@@ -191,6 +191,18 @@ local function initState()
   for _, m in ipairs({ "VIP", "GM" }) do
     if type(st[m]) == "table" then st[m].f = (tonumber(st[m].f) or 0) | 8 end
   end
+  -- Offline nothing announces a new day, so roll the daily state over here,
+  -- before the login profile is built (as PLAYER.DAILY_RESET does).
+  local okDay, day = pcall(function() return _ENV.GetDateNumber() end)
+  day = okDay and tonumber(day) or tonumber(os.date("%Y%m%d"))
+  local lastDay = saved and tonumber(saved._day)
+  if lastDay and lastDay < day then
+    if type(st.PLAYER) == "table" then st.PLAYER.dg = 0 end
+    if type(st.SHOP) == "table" then st.SHOP.tph = {}; st.SHOP.tsl = {} end
+    if type(st.BOX) == "table" then st.BOX.ot = {} end
+    print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
+  end
+  st._day = day
   if NetAgent.ensureShops and type(st.SHOP) == "table" then NetAgent.ensureShops(st.SHOP) end
   print("[OFFLINE] profile restored modules=" .. n)
   NetAgent.state = st
