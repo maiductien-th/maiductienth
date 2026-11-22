@@ -122,35 +122,6 @@ local function encode(data, en)
   return nil, 0
 end
 
--- Server responses carry module updates in sync_list: a Lua literal
--- {[ModuleDef.SYNC index] = data index-keyed with that module's key_enum},
--- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
--- before the request callback runs (stock net_agent.lua:656).
-local function fireSync(agent, partials)
-  if type(partials) ~= "table" then return end
-  local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
-  local out, n = {}, 0
-  for i, m in ipairs(md.SYNC) do
-    local part = partials[m.name]
-    if part ~= nil then
-      local mod = mgr and mgr:GetModuleByIndex(i)
-      local en = mod and mod.key_enum
-      local ix = encode(part, en)
-      if ix == nil then
-        local ks = {}
-        for k in pairs(part) do ks[#ks + 1] = tostring(k) end
-        print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped keys=" .. table.concat(ks, ","))
-      else
-        out[i] = ix; n = n + 1
-      end
-    end
-  end
-  if n == 0 then return end
-  local literal = ser(out)
-  print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
-  _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
-end
-
 local function deepcopy(v)
   if type(v) ~= "table" then return v end
   local o = {}
@@ -163,6 +134,110 @@ local function moduleDefaults(name)
   end
   return {}
 end
+-- ECO data "d" is keyed by item id client-side (ModuleDef defaults use
+-- GameDef.ITEM_ID.*), but economic_module.unzipData (lua:76-91) maps the
+-- wire keys through economic_index2key, built from item config entries of
+-- type "Economic" by their "index". So the wire form is keyed by index.
+local function ecoZip(data)
+  if type(data) ~= "table" or type(data.d) ~= "table" then return data end
+  local items = _ENV.ConfigMgr and _ENV.ConfigMgr:GetConfig("item")
+  if type(items) ~= "table" then return data end
+  local out = {}
+  for k, v in pairs(data) do out[k] = v end
+  local d = {}
+  for id, n in pairs(data.d) do
+    local cfg = items[id]
+    if type(cfg) == "table" and cfg.type == "Economic" and cfg.index ~= nil then
+      d[cfg.index] = n
+    else
+      d[id] = n
+    end
+  end
+  out.d = d
+  return out
+end
+local function wire(name, data)
+  if name == "ECO" then return ecoZip(data) end
+  return data
+end
+
+-- Local player state: what the server would hold. Seeded from the client's
+-- own ModuleDef.SYNC defaults, replaced per module on every sync, and saved
+-- to the app's private files dir so it survives a restart.
+local SAVE_PATH = "/data/data/com.fattoy.swordash.android/files/offline_profile.lua"
+NetAgent.state = NetAgent.state or nil
+local function saveState()
+  if type(NetAgent.state) ~= "table" then return end
+  local f = io.open(SAVE_PATH .. ".tmp", "w")
+  if not f then print("[OFFLINE] save: cannot open " .. SAVE_PATH); return end
+  f:write("return " .. ser(NetAgent.state))
+  f:close()
+  os.remove(SAVE_PATH)
+  local ok = os.rename(SAVE_PATH .. ".tmp", SAVE_PATH)
+  print("[OFFLINE] saved profile ok=" .. tostring(ok))
+end
+local function loadSaved()
+  local f = io.open(SAVE_PATH, "r")
+  if not f then return nil end
+  local text = f:read("*a")
+  f:close()
+  local chunk = load(text, "offline_profile", "t", {})
+  if not chunk then print("[OFFLINE] saved profile unreadable"); return nil end
+  local ok, t = pcall(chunk)
+  if ok and type(t) == "table" then return t end
+  print("[OFFLINE] saved profile invalid")
+  return nil
+end
+local function initState()
+  local st = {}
+  for _, m in ipairs(_ENV.ModuleDef.SYNC) do st[m.name] = deepcopy(m.data or {}) end
+  local saved = loadSaved()
+  local n = 0
+  if saved then
+    for name, data in pairs(saved) do
+      if st[name] ~= nil and type(data) == "table" then st[name] = data; n = n + 1 end
+    end
+  end
+  print("[OFFLINE] profile restored modules=" .. n)
+  NetAgent.state = st
+  return st
+end
+local function moduleState(name)
+  local st = NetAgent.state or initState()
+  return deepcopy(st[name] or {})
+end
+
+-- Server responses carry module updates in sync_list: a Lua literal
+-- {[ModuleDef.SYNC index] = data index-keyed with that module's key_enum},
+-- which net_agent hands to RemoteModuleMgr via Event "SYNC_SERVER_DATA"
+-- before the request callback runs (stock net_agent.lua:656).
+local function fireSync(agent, partials)
+  if type(partials) ~= "table" then return end
+  local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
+  local out, n = {}, 0
+  for i, m in ipairs(md.SYNC) do
+    local part = partials[m.name]
+    if part ~= nil then
+      if NetAgent.state then NetAgent.state[m.name] = deepcopy(part) end
+      local mod = mgr and mgr:GetModuleByIndex(i)
+      local en = mod and mod.key_enum
+      local ix = encode(wire(m.name, part), en)
+      if ix == nil then
+        local ks = {}
+        for k in pairs(part) do ks[#ks + 1] = tostring(k) end
+        print("[OFFLINE] sync " .. tostring(m.name) .. " does not roundtrip; skipped keys=" .. table.concat(ks, ","))
+      else
+        out[i] = ix; n = n + 1
+      end
+    end
+  end
+  if n == 0 then return end
+  saveState()
+  local literal = ser(out)
+  print("[OFFLINE] SYNC_SERVER_DATA " .. literal)
+  _ENV.Event:FireEvent(agent, "SYNC_SERVER_DATA", literal)
+end
+
 local function addChosenTco(st, list)
   if type(list) ~= "table" then return end
   for _, e in ipairs(list) do
@@ -253,6 +328,52 @@ local RESPONSES = {
   -- BATTLE.CHOOSE_TCO (battle_module_tco.lua:636-675) sends {id = tco
   -- server_id}; the callback only checks ret_code == SUCCESS and reads an
   -- optional count (defaults to 1).
+  -- BATTLE.DEAD is sent by native code with no args when the hero dies;
+  -- battle_module.GetDeadTime (lua:188-195) reads the death count as
+  -- vi.dt, so the response counts the death in the BATTLE state.
+  ["BATTLE.DEAD"] = function()
+    local st = NetAgent.battle or moduleDefaults("BATTLE")
+    st.vi = type(st.vi) == "table" and st.vi or {}
+    st.vi.ctl = type(st.vi.ctl) == "table" and st.vi.ctl or {}
+    st.vi.dt = (tonumber(st.vi.dt) or 0) + 1
+    NetAgent.battle = st
+    return { ret_code = protoCode("SUCCESS", 1) }, { BATTLE = st }
+  end,
+  -- BATTLE.OVER (battle_module.lua:448-494) sends stage_id, stage_level,
+  -- result (BATTLE_RESULT name), time, coin and kill/choose_tco; its
+  -- callback ignores the response and fires BATTLE.STAGE_OVER, but a
+  -- non-SUCCESS ret_code raises "Server error". proto_def lists
+  -- extra_reward and star_reward (*starreward) in the response; nothing
+  -- extra is awarded offline. The battle ends: BATTLE returns to defaults.
+  -- On a win the coins picked up are credited and a main stage advances
+  -- ADV "stage" (economic_module.passStage: passed N <=> stage > N).
+  ["BATTLE.OVER"] = function(data)
+    data = type(data) == "table" and data or {}
+    local sync = { BATTLE = moduleDefaults("BATTLE") }
+    NetAgent.battle = nil
+    local names = _ENV.BattleModule and _ENV.BattleModule.BATTLE_RESULT
+    local result = data.result
+    local won = result == 1 or result == "VICTORY" or (type(names) == "table" and names[result] == "VICTORY")
+    print("[OFFLINE] OVER stage=" .. tostring(data.stage_id) .. " result=" .. tostring(result) .. " won=" .. tostring(won) .. " coin=" .. tostring(data.coin))
+    if won then
+      local eco = moduleState("ECO")
+      eco.d = type(eco.d) == "table" and eco.d or {}
+      local coinId = _ENV.GameDef.ITEM_ID and _ENV.GameDef.ITEM_ID.COIN or "coin"
+      eco.d[coinId] = (tonumber(eco.d[coinId]) or 0) + math.floor(tonumber(data.coin) or 0)
+      sync.ECO = eco
+      local cfg = _ENV.ConfigMgr:GetStageConfig(tostring(data.stage_id or ""))
+      if type(cfg) == "table" and tonumber(cfg.index) then
+        local adv = moduleState("ADV")
+        local nextIndex = math.floor(tonumber(cfg.index)) + 1
+        if cfg.type == "main" and (tonumber(adv.stage) or 1) < nextIndex then
+          adv.stage = nextIndex
+          adv.room = -1
+          sync.ADV = adv
+        end
+      end
+    end
+    return { ret_code = protoCode("SUCCESS", 1), extra_reward = {}, star_reward = {} }, sync
+  end,
   ["BATTLE.CHOOSE_TCO"] = function(data)
     return { ret_code = protoCode("SUCCESS", 1), count = 1 }
   end,
@@ -275,6 +396,19 @@ local function offlineResponse(group, name, data)
   if build then
     local res, sync = build(data)
     return res, true, sync
+  end
+  local pf = io.open(SAVE_PATH:gsub("offline_profile.lua$", "offline_patch.lua"), "r")
+  if pf then
+    local text = pf:read("*a"); pf:close()
+    local chunk = load(text, "offline_patch", "t", _ENV)
+    if chunk then
+      local ok, extra = pcall(chunk)
+      if ok and type(extra) == "table" and extra[tag] then
+        print("[OFFLINE] PATCHED " .. tag)
+        local res, sync = extra[tag](data, { protoCode = protoCode, moduleState = moduleState, moduleDefaults = moduleDefaults, NetAgent = NetAgent })
+        return res, true, sync
+      end
+    end
   end
   print("[OFFLINE] UNRESOLVED " .. tag .. " -> ret_code=OFFLINE")
   return { ret_code = protoCode("OFFLINE", -1) }, false
@@ -353,6 +487,7 @@ function NetAgent:Login(...)
   if type(_ENV.GameDef) == "table" then dumpTable("GameDef.PROTO_CODE", _ENV.GameDef.PROTO_CODE) end
   local U = _ENV.Utils
   local profile = {}
+  local state = initState()
   local md = _ENV.ModuleDef
   if type(md) == "table" and type(md.SYNC) == "table" then
     for i, m in ipairs(md.SYNC) do
@@ -360,8 +495,8 @@ function NetAgent:Login(...)
       if type(m.data) == "table" then for k in pairs(m.data) do keys[#keys + 1] = tostring(k) end end
       print("[OFFLINE] SYNC[" .. i .. "] name=" .. tostring(m.name) .. " script=" .. tostring(m.script) ..
             " version=" .. tostring(m.version) .. " data_keys=" .. table.concat(keys, ","))
-      local data = m.data or {}
-      local ix, order = encode(data)
+      local data = state[m.name] or m.data or {}
+      local ix, order = encode(wire(m.name, data))
       if ix == nil then
         print("[OFFLINE] SYNC[" .. i .. "] " .. tostring(m.name) .. " UNENCODED (no roundtrip)")
         ix = data
@@ -388,7 +523,7 @@ function NetAgent:Login(...)
     login_result    = success,
     role_data       = role,
     server_timezone = 0,
-    server_time     = 0,
+    server_time     = os.time(),
     uid             = 1,
     new_day         = false,
     param           = 0,
