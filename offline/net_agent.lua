@@ -702,10 +702,16 @@ local function stageDrop(cfg)
   local chapter = math.max(1, math.floor(tonumber(cfg and cfg.chapter) or 1))
   local base = DROP_SETS[math.min(chapter, #DROP_SETS)]
   local rows = _ENV.ConfigMgr:GetConfig("equipment") or {}
+  local items = _ENV.ConfigMgr:GetConfig("item") or {}
   local pool = {}
   for _, r in pairs(rows) do
     local id = type(r) == "table" and tonumber(r.id)
-    if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1 then pool[#pool + 1] = r.name end
+    -- Some valid equipment rows have no item row (e.g. Survivor_Boots); the
+    -- client cannot show those, so only drop pieces with an ItemConfig.
+    if id and id > base and id <= base + 5 and (tonumber(r.valid) or 0) == 1
+        and rawget(items, r.name) ~= nil then
+      pool[#pool + 1] = r.name
+    end
   end
   table.sort(pool)
   if #pool == 0 then return nil end
@@ -1645,6 +1651,13 @@ if MENU_BUILD then
   }
   function Menu.Patch()
     Menu.InstallOneHit()
+    -- The GM flag that enables the menu also turns on the developer error
+    -- overlay (GMModule:IsOpenView); keep the menu, drop the overlay.
+    local gmm = _ENV.GMModule
+    if type(gmm) == "table" and not gmm.__offline_noview then
+      gmm.IsOpenView = function() return false end
+      gmm.__offline_noview = true
+    end
     local gm = _ENV.GM
     if type(gm) ~= "table" then
       local ok = pcall(require, "module.gm")
