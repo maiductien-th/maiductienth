@@ -2113,7 +2113,8 @@ if MENU_BUILD then
   end
 
   -- One hit is built into the menu APK: tools/csv_onehit.py rewrites the
-  -- character table in assets/scg.ab so every monster and boss has maxHp 1.
+  -- enemy HP tables in assets/scg.ab (character, stage_room_property,
+  -- stage_level) so every enemy spawns with 1 HP.
   -- Patching the table at runtime (loadCfgFile4CS + ReloadConfig) did not
   -- reach the C# battle, which keeps its own copy.
   NAMES = {
