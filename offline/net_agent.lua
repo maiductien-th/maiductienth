@@ -296,15 +296,33 @@ local function syncDelta(ix, prevIx)
   return out
 end
 
-local function fireSync(agent, partials)
+-- Requests can be handled before the previous response is published, so a
+-- handler's sync is committed to the state at once; fireSync later sends the
+-- delta against the state the handler started from.
+local function commitSync(partials)
+  local prevs = {}
+  if type(partials) ~= "table" or not NetAgent.state then return prevs end
+  for name, part in pairs(partials) do
+    prevs[name] = deepcopy(NetAgent.state[name])
+    NetAgent.state[name] = deepcopy(part)
+  end
+  return prevs
+end
+
+local function fireSync(agent, partials, prevs)
   if type(partials) ~= "table" then return end
   local md, mgr = _ENV.ModuleDef, _ENV.RemoteModuleMgr
   local out, n = {}, 0
   for i, m in ipairs(md.SYNC) do
     local part = partials[m.name]
     if part ~= nil then
-      local prev = NetAgent.state and NetAgent.state[m.name]
-      if NetAgent.state then NetAgent.state[m.name] = deepcopy(part) end
+      local prev
+      if prevs then
+        prev = prevs[m.name]
+      else
+        prev = NetAgent.state and NetAgent.state[m.name]
+        if NetAgent.state then NetAgent.state[m.name] = deepcopy(part) end
+      end
       local mod = mgr and mgr:GetModuleByIndex(i)
       local en = mod and mod.key_enum
       local ix = encode(part, en)
@@ -404,6 +422,44 @@ local function realIdOf(itemId)
     if ok and id == itemId then return rid end
   end
   return nil
+end
+
+-- pet_module: pet config index (base_value >> 10) from a pool row name /
+-- choose key, which is the pet's server_id.
+local function petTemplateId(key)
+  -- item_choose keys ("pet_1_1") map to a row whose name is the server_id;
+  -- pool rows are bare ids
+  local k = tostring(key or "")
+  local n
+  for _, grp in pairs(_ENV.ConfigMgr:GetConfig("item_choose") or {}) do
+    local row = type(grp) == "table" and grp[k]
+    if type(row) == "table" and row.type == "pet" then
+      n = tonumber(row.name)
+      break
+    end
+  end
+  n = n or tonumber(k:match("^pet_(%d+)") or k:match("(%d+)$"))
+  if not n then return nil end
+  local cm = _ENV.ConfigMgr
+  local ok, tid = pcall(cm.GetPetTemplateIdByServerId, cm, n)
+  tid = ok and tonumber(tid) or n
+  local ok2, c = pcall(cm.GetPetConfig, cm, tid)
+  return ok2 and type(c) == "table" and tid or nil
+end
+
+-- pet_module._GetPetMaxEnergy(pet_row, level, distribution); full energy for
+-- a new or recharged pet.
+local function petMaxEnergy(row)
+  local b, g = tonumber(row[1]) or 0, tonumber(row[2]) or 0
+  local ok, v = pcall(_ENV.PetModule._GetPetMaxEnergy, _ENV.PetModule, row, b & 0x3ff, g & 0xffff)
+  return ok and tonumber(v) and math.floor(v) or 100
+end
+
+-- pet_module grade thresholds (PET_QUALITY good/rare/epic/legend).
+local function petGrade(dist)
+  local g = 0
+  for _, t in ipairs({ 1837, 2946, 4336, 6180 }) do if dist >= t then g = g + 1 end end
+  return g
 end
 
 local function equipTemplateId(key)
@@ -528,6 +584,7 @@ end
 local function poolEntry(r)
   local n = math.max(1, math.floor(tonumber(r.param) or 1))
   if r.type == "equip" then return { id = "gift_equip", count = 1, args = tostring(r.name) } end
+  if r.type == "pet" then return { id = "gift_pet", count = 1, args = tostring(r.name) } end
   return { id = tostring(r.name), count = n }
 end
 
@@ -583,6 +640,13 @@ local function expandRandom(entries, all, depth)
       -- fixed piece (args = equipment name) at params.distribution quality
       out[#out + 1] = { id = "gift_equip", count = math.floor(e.count or 1), args = e.args,
         dist = type(cfg.params) == "table" and tonumber(cfg.params.distribution) or nil }
+    elseif type(cfg) == "table" and (cfg.type == "SpecPet" or cfg.type == "Pet") and e.args then
+      -- args = pet template (pool_pet row name / choose key); SpecPet fixes
+      -- the quality, Pet rolls it up to params[1].
+      local pr = type(cfg.params) == "table" and cfg.params or {}
+      local dist, grade = tonumber(pr.distribution), tonumber(pr.grade)
+      if not dist then dist = math.random(1000, math.max(1000, math.floor(tonumber(pr[1]) or 6000))) end
+      out[#out + 1] = { id = "gift_pet", count = math.floor(e.count or 1), args = e.args, dist = dist, grade = grade }
     elseif type(cfg) == "table" and cfg.type == "ReplaceItem" and type(cfg.params) == "table"
         and type(cfg.params.raw) == "table" then
       -- the replacement only applies once the condition (e.g. noAD) is owned
@@ -605,6 +669,8 @@ local function rewardsGrantable(entries)
     local kind = type(cfg) == "table" and cfg.type
     if e.id == "gift_equip" then
       if not equipTemplateId(e.args) then return false, e.args end
+    elseif e.id == "gift_pet" then
+      if not petTemplateId(e.args) then return false, e.args end
     elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
         and kind ~= "PetCapacity" and kind ~= "MonthCard" and kind ~= "MonthCardTrial" and kind ~= "Skin"
         and not realIdOf(e.id) then
@@ -656,6 +722,32 @@ local function grantRewards(entries, sync)
           dist = math.max(1, math.floor(tonumber(e.dist) or 1)) }
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
+      end
+    elseif id == "gift_pet" then
+          -- PET.pl[pet_id] = {base_value, grade_data, skill_list, energy}:
+      -- base_value level | tid << 10, grade_data distribution | grade << 16.
+      local tid = petTemplateId(e.args)
+      if tid then
+        sync.PET = sync.PET or moduleState("PET")
+        local pet = sync.PET
+        pet.pl = tbl(pet.pl)
+        local uids = {}
+        for _ = 1, n do
+          local uid = 0
+          for k in pairs(pet.pl) do uid = math.max(uid, tonumber(k) or 0) end
+          uid = tostring(uid + 1)
+          local dist = math.max(1, math.floor(tonumber(e.dist) or 1000))
+          local grade = math.floor(tonumber(e.grade) or petGrade(dist))
+          local row = { [1] = 1 | (tid << 10), [2] = dist | (grade << 16), [3] = {}, [4] = 100 }
+          row[4] = petMaxEnergy(row)
+          pet.pl[uid] = row
+          uids[#uids + 1] = uid
+          print("[OFFLINE] pet granted " .. uid .. " tid=" .. tid .. " dist=" .. dist .. " grade=" .. grade)
+        end
+        -- OwnedPet reward rows carry the created pet_id as args
+        for _, u in ipairs(uids) do shown[#shown + 1] = { id = "mypet", count = 1, args = u } end
+      else
+        print("[OFFLINE] reward UNRESOLVED pet " .. tostring(e.args))
       end
     elseif type(cfg) == "table" and cfg.type == "Energy" then
       -- energy_module.GetEnergy reads ENERGY.e.
@@ -1353,6 +1445,105 @@ RESPONSES = {
 
   -- economic_module.lua:300-313: ITEM.USE {item_id, item_index, use_count};
   -- the item's realitem UseReward is granted.
+  -- item_choose items (pay_pet_D, choose_pay_weapon, ...): an Economic item
+  -- whose params.item is granted with the picked pool row as args.
+  ["ITEM.CHOOSE"] = function(data)
+    data = type(data) == "table" and data or {}
+    local id, key = tostring(data.id or ""), data.choose_key
+    local cfg = (_ENV.ConfigMgr:GetConfig("item") or {})[id]
+    local eco = moduleState("ECO")
+    eco.d = tbl(eco.d)
+    if type(cfg) ~= "table" or type(cfg.params) ~= "table" or not cfg.params.item or key == nil then
+      return failRes("ITEM.CHOOSE unknown " .. id .. " key=" .. tostring(key))
+    end
+    if (tonumber(eco.d[id]) or 0) < 1 then return failRes("ITEM.CHOOSE not owned " .. id) end
+    local entries = { { id = tostring(cfg.params.item), count = 1, args = tostring(key) } }
+    local grantable, bad = rewardsGrantable(entries)
+    if not grantable then return failRes("ITEM.CHOOSE reward unresolved " .. tostring(bad)) end
+    eco.d[id] = eco.d[id] - 1
+    local sync = { ECO = eco }
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ITEM.CHOOSE " .. id .. " key=" .. tostring(key) .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+
+  -- pet_module: bpl[pet_id] = 1 for pets in battle, at most GetPetSlotCount.
+  ["PET.SET_BATTLE"] = function(data)
+    data = type(data) == "table" and data or {}
+    local pet = moduleState("PET")
+    pet.pl, pet.bpl = tbl(pet.pl), tbl(pet.bpl)
+    local pid = tostring(data.id or "")
+    if not pet.pl[pid] then return failRes("PET.SET_BATTLE unknown " .. pid) end
+    if (tonumber(data.battle_state) or 0) ~= 0 then
+      local slots = 1
+      pcall(function() slots = _ENV.PetModule:GetPetSlotCount() end)
+      local cnt = 0
+      for k in pairs(pet.bpl) do if k ~= pid then cnt = cnt + 1 end end
+      if cnt >= slots then
+        -- one slot: swap the pet in battle for the new one
+        if slots <= 1 then pet.bpl = {} else return failRes("PET.SET_BATTLE no slot") end
+      end
+      pet.bpl[pid] = 1
+    else
+      pet.bpl[pid] = nil
+    end
+    return okRes({ result = 1 }), { PET = pet }
+  end,
+
+  -- potential_module: the Seek worker pet is POTENTIAL.sl.pi ("0" = none).
+  ["POTENTIAL.SET_ASSIST_PET"] = function(data)
+    data = type(data) == "table" and data or {}
+    local pid = tostring(data.id or "0")
+    local pet = moduleState("PET")
+    if pid ~= "0" and not tbl(pet.pl)[pid] then
+      return failRes("POTENTIAL.SET_ASSIST_PET unknown " .. pid)
+    end
+    local pot = moduleState("POTENTIAL")
+    pot.sl = tbl(pot.sl)
+    pot.sl.pi = pid ~= "0" and pid or 0
+    return okRes(), { POTENTIAL = pot }
+  end,
+  -- Offline there is no shop for pet energy: recharging refills to max for free.
+  ["PET.ADD_ENERGY"] = function(data)
+    local pet = moduleState("PET")
+    local e = tbl(pet.pl)[tostring(type(data) == "table" and data.id or "")]
+    if type(e) ~= "table" then return failRes("PET.ADD_ENERGY unknown") end
+    e[4] = petMaxEnergy(e)
+    return okRes(), { PET = pet }
+  end,
+  ["PET.RECHARGE"] = function(data)
+    local pet = moduleState("PET")
+    local e = tbl(pet.pl)[tostring(type(data) == "table" and data.id or "")]
+    if type(e) ~= "table" then return failRes("PET.RECHARGE unknown") end
+    e[4] = petMaxEnergy(e)
+    return okRes(), { PET = pet }
+  end,
+  ["PET.DEAD"] = function() return okRes() end,
+  ["PET.REMOVE"] = function(data)
+    local pid = tostring(type(data) == "table" and data.id or "")
+    local pet = moduleState("PET")
+    pet.pl, pet.bpl = tbl(pet.pl), tbl(pet.bpl)
+    if not pet.pl[pid] then return failRes("PET.REMOVE unknown " .. pid) end
+    pet.pl[pid], pet.bpl[pid] = nil, nil
+    local sync = { PET = pet }
+    local pot = moduleState("POTENTIAL")
+    if type(pot.sl) == "table" and tostring(pot.sl.pi) == pid then
+      pot.sl.pi = 0
+      sync.POTENTIAL = pot
+    end
+    return okRes({ reward = {} }), sync
+  end,
+  ["PET.SET_LOCK"] = function(data)
+    data = type(data) == "table" and data or {}
+    local pet = moduleState("PET")
+    pet.pl = tbl(pet.pl)
+    local e = pet.pl[tostring(data.id or "")]
+    if type(e) ~= "table" then return failRes("PET.SET_LOCK unknown " .. tostring(data.id)) end
+    local b = tonumber(e[1]) or 0
+    e[1] = (tonumber(data.lock_state) or 0) ~= 0 and (b | (1 << 30)) or (b & ~(1 << 30))
+    return okRes({ result = 1 }), { PET = pet }
+  end,
+
   ["ITEM.USE"] = function(data)
     data = type(data) == "table" and data or {}
     local rid = realIdOf(data.item_id)
@@ -2664,6 +2855,17 @@ local function unlockAllModules()
     for k in pairs(gd.MODULE_UNLOCK_STAGE) do gd.MODULE_UNLOCK_STAGE[k] = 0 end
   end
   if tonumber(gd.HEROIC_UNLOCK_STAGE) then gd.HEROIC_UNLOCK_STAGE = 0 end
+  -- item UseCondition {id = "passStage", param = N} (pay_pet_D: Mission 5)
+  local cm = _ENV.ConfigMgr
+  for _, c in pairs(cm and cm:GetConfig("item") or {}) do
+    if type(c) == "table" and type(c.UseCondition) == "table" then
+      local keep = {}
+      for _, u in ipairs(c.UseCondition) do
+        if not (type(u) == "table" and u.id == "passStage") then keep[#keep + 1] = u end
+      end
+      c.UseCondition = keep
+    end
+  end
   gd.__offline_unlock = true
 end
 
@@ -2701,13 +2903,14 @@ function NetAgent:SendRequest(group, name, data, cb)
   stopBindPanel()
   if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
   local res, _, sync = offlineResponse(group, name, data)
+  local prevs = commitSync(sync)
   local agent = self
   -- the caller publishes SERVER_RESPONSE from this callback and only then
   -- waits on it, so delivering inline drops the message ("Wait nil But
   -- Receive SERVER_RESPONSE"). Defer to the next tick.
   self.pending[#self.pending + 1] = {
     res = res, tag = tostring(group) .. "." .. tostring(name),
-    cb = function(r) fireSync(agent, sync); if cb then cb(r) end end,
+    cb = function(r) fireSync(agent, sync, prevs); if cb then cb(r) end end,
   }
   return res
 end
@@ -2720,12 +2923,13 @@ function NetAgent:SendRequest4CS(group, name, args)
   local session = self.cs_session or 1
   self.cs_session = session + 1
   local res, _, sync = offlineResponse(group, name, args)
+  local prevs = commitSync(sync)
   local agent = self
   self.pending[#self.pending + 1] = {
     tag = tostring(group) .. "." .. tostring(name) .. "#cs",
     res = res,
     cb = function(r)
-      fireSync(agent, sync)
+      fireSync(agent, sync, prevs)
       if agent.cs_callback then agent.cs_callback(session, r)
       else print("[OFFLINE] no cs_callback for session " .. session) end
     end,
