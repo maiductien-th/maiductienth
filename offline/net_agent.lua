@@ -2325,19 +2325,17 @@ RESPONSES = {
     for _, r in ipairs(granted) do
       for _, u in ipairs(tbl(r.uids)) do OFFLINE_LAST_BOX[#OFFLINE_LAST_BOX + 1] = { uid = u, args = r.args } end
     end
-    -- BoxItemsPanel reads quality through ItemMgr's executor for the item
-    -- id: gift_equip (EquipmentItem) only knows the template name, so every
-    -- frame is common. drop_equip (DropEquipmentItem) Int32.TryParses params
-    -- and passes it to EquipModule.ParseEquipParamValue (template id << 16 |
-    -- distribution), as battle_module builds battle drops. Battle drops carry
-    -- no args: the item icons pass args, when set, as the param, which here
-    -- is the template name, fails TryParse and shows the "?" placeholder.
+    -- BoxItemsPanel shows each piece through ItemMgr's executor for the item
+    -- id. gift_equip (SpecEquipmentItem) only knows the template name, so
+    -- every frame is common, and drop_equip never resolves its icon here.
+    -- myequip (OwnedEquipmentItem) takes the owned uid and reads template and
+    -- quality from the granted piece, and EquipModule.IsDecomposition handles
+    -- it natively for the decompose marker.
     local reward = {}
     for _, r in ipairs(granted) do
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
-        for _ = 1, #r.uids do
-          reward[#reward + 1] = { id = "drop_equip", count = 1, quantity = 1,
-            params = tostring((r.tid << 16) | (r.dist or 1)) }
+        for _, u in ipairs(r.uids) do
+          reward[#reward + 1] = { id = "myequip", count = 1, quantity = 1, params = tostring(u) }
         end
       else
         reward[#reward + 1] = r
