@@ -862,6 +862,38 @@ end
 -- pending callback on disconnect; no fields are invented for it.
 -- Offline economy helpers shared by the shop, equipment, technology,
 -- sign-in and battle-reward handlers below.
+-- FrontLineModule.GetActivityData reads activity_pool.FRONTLINE.data[wday]
+-- for each round's wday in FRONTLINE_REFRESH_WDAY {2, 4, 6, 1}:
+-- [1] str2lua map whose keys are frontline tco list server_ids,
+-- [2] trigger seed, [3] map_stage.frontline index, [4] frontline fate
+-- pool index. The server normally rotates these; offline they are built
+-- from the shipped config so every round has a stage, skills and a modifier.
+local function frontlineSchedule()
+  local cm = _ENV.ConfigMgr
+  local function keys(t)
+    local out = {}
+    for k in pairs(type(t) == "table" and t or {}) do out[#out + 1] = k end
+    table.sort(out, function(a, b) return tostring(a) < tostring(b) end)
+    return out
+  end
+  local tcos, fates, stages = {}, {}, {}
+  pcall(function() tcos = keys(cm:GetTcoListConfigByType("frontline")) end)
+  pcall(function() fates = keys(cm:GetFatePoolConfigByType("frontline")) end)
+  pcall(function() stages = keys(cm:GetConfig("map_stage").frontline) end)
+  table.sort(stages, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
+  local pick = {}
+  for _, k in ipairs(tcos) do pick[k] = 1 end
+  local data = {}
+  for r, wday in ipairs({ 2, 4, 6, 1 }) do
+    data[wday] = {
+      ser(pick),
+      1000 + r,
+      stages[#stages > 0 and ((r - 1) % #stages) + 1 or 0] or 1,
+      fates[#fates > 0 and ((r - 1) % #fates) + 1 or 0] or 1,
+    }
+  end
+  return data
+end
 local function okRes(t)
   t = t or {}
   t.ret_code = protoCode("SUCCESS", 1)
@@ -1385,6 +1417,9 @@ RESPONSES = {
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
     -- Other activities (e.g. FRONTLINE) index activity_pool[type].data, so
     -- they get an empty schedule: present, but with no round running.
+    if tostring(tbl(data).type) == "FRONTLINE" then
+      return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = frontlineSchedule(), daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }) }
+    end
     if tostring(tbl(data).type) ~= "CHEST" then
       return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = {}, daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }) }
     end
@@ -1448,6 +1483,28 @@ RESPONSES = {
   -- after the stage that unlocks the bank, so an unanswered request leaves
   -- that load on the loading screen. Opening the next bank: index i + 1,
   -- start time st, empty savings cs/ts.
+  -- FrontLinePanel.RequestReset runs on every open; nothing to reset offline.
+  ["FRONTLINE.RESET"] = function() return okRes(), { FRONTLINE = moduleState("FRONTLINE") } end,
+  -- The round score is kept per round in FRONTLINE.ds (best of the week).
+  ["FRONTLINE.CALCULATE_SCORE"] = function(data)
+    data = tbl(data)
+    local fl = moduleState("FRONTLINE")
+    fl.ds = tbl(fl.ds)
+    local round = (((tonumber(fl.fd) or 0) >> 11) & 0x7) + 1
+    local score = math.floor(tonumber(data.score) or 0)
+    if score <= 0 then
+      local wave = math.floor(tonumber(data.monster_wave) or 0)
+      score = wave > 0 and (400 * wave + (wave - 1) * wave * 35) or 0
+    end
+    if score > (tonumber(fl.ds[round]) or 0) then fl.ds[round] = score end
+    return okRes({ score = score }), { FRONTLINE = fl }
+  end,
+  -- Auction is a live player market; offline it is open and empty.
+  ["AUCTION.REQUEST_ALL_DATA"] = function() return okRes({ list = {}, max_count = 10 }) end,
+  ["AUCTION.REQUEST_STATUS_CHANGED"] = function() return okRes({ list = {} }) end,
+  ["AUCTION.QUERY_LIST_EQUIP"] = function() return okRes({ list = {} }) end,
+  ["AUCTION.WATCH_PRICE"] = function() return okRes() end,
+  ["AUCTION.CANCEL_WATCH"] = function() return okRes() end,
   ["PIG_BANK.CHECK_NEXT"] = function()
     local pb = moduleState("PIG_BANK")
     pb.i = math.max(0, math.floor(tonumber(pb.i) or 0)) + 1
