@@ -637,9 +637,10 @@ local function expandRandom(entries, all, depth)
       for _ = 1, math.floor(e.count or 1) do n = n + (all and lo or math.random(lo, hi)) end
       out[#out + 1] = { id = tostring(rid), count = n }
     elseif type(cfg) == "table" and cfg.type == "SpecEquipment" and e.args then
-      -- fixed piece (args = equipment name) at params.distribution quality
+      -- fixed piece (args = equipment name); a quality rolled by the caller
+      -- (box, stage drop) wins over params.distribution
       out[#out + 1] = { id = "gift_equip", count = math.floor(e.count or 1), args = e.args,
-        dist = type(cfg.params) == "table" and tonumber(cfg.params.distribution) or nil }
+        dist = tonumber(e.dist) or type(cfg.params) == "table" and tonumber(cfg.params.distribution) or nil }
     elseif type(cfg) == "table" and (cfg.type == "SpecPet" or cfg.type == "Pet") and e.args then
       -- args = pet template (pool_pet row name / choose key); SpecPet fixes
       -- the quality, Pet rolls it up to params[1].
