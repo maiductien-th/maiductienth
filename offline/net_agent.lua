@@ -2315,16 +2315,17 @@ RESPONSES = {
     for _, r in ipairs(granted) do
       for _, u in ipairs(tbl(r.uids)) do OFFLINE_LAST_BOX[#OFFLINE_LAST_BOX + 1] = { uid = u, args = r.args } end
     end
-    -- BoxItemsPanel draws the gift_equip icon from args and its quality
-    -- frame from EquipModule:ParseEquipParamValue(params), which reads a
-    -- number (template id << 16 | distribution) and gives quality 0 for
-    -- anything else.
+    -- BoxItemsPanel reads quality through ItemMgr's executor for the item
+    -- id: gift_equip (EquipmentItem) only knows the template name, so every
+    -- frame is common. drop_equip (DropEquipmentItem) Int32.TryParses params
+    -- and passes it to EquipModule.ParseEquipParamValue (template id << 16 |
+    -- distribution), as battle_module builds battle drops.
     local reward = {}
     for _, r in ipairs(granted) do
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
         for _ = 1, #r.uids do
-          reward[#reward + 1] = { id = "gift_equip", count = 1, args = r.args,
-            params = (r.tid << 16) | (r.dist or 1) }
+          reward[#reward + 1] = { id = "drop_equip", count = 1, quantity = 1, args = r.args,
+            params = tostring((r.tid << 16) | (r.dist or 1)) }
         end
       else
         reward[#reward + 1] = r
