@@ -222,6 +222,7 @@ local function initState()
     if type(st.PLAYER) == "table" then st.PLAYER.dg = 0 end
     if type(st.SHOP) == "table" then st.SHOP.tph = {}; st.SHOP.tsl = {} end
     if type(st.BOX) == "table" then st.BOX.ot = {} end
+    if type(st.HUNTER) == "table" then st.HUNTER.dr = 0 end
     -- vip_module.CanClaimDailyReward: an active card (mc[id].ft >= today)
     -- can claim while ccd > 0.
     if type(st.VIP) == "table" and type(st.VIP.mc) == "table" then
