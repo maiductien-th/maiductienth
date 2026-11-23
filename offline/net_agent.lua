@@ -2998,6 +2998,18 @@ local function patchEquipDecompose()
     if type(item) == "table" and (item.id == "gift_equip" or item.id == "drop_equip") then return false end
     return orig(self, item, ...)
   end
+  -- DropEquipmentItem (C#) calls ParseEquipParamValue through a
+  -- RunGlobalTableFunction overload that may not pass the module as self, so
+  -- the packed value lands in the first slot and the icon falls back to "?".
+  -- Accept either calling convention.
+  if type(em.ParseEquipParamValue) == "function" then
+    em.ParseEquipParamValue = function(a, b)
+      local v = math.tointeger(tonumber(type(a) == "table" and b or a))
+      if not v then return { id = "0", quality = "0" } end
+      local gd = _ENV.GameDef
+      return { id = tostring(v >> 16), quality = gd:GetEquipQuality(v & 0xFFFF) }
+    end
+  end
   em.__offline_dec = true
 end
 
