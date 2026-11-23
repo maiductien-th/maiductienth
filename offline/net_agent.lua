@@ -1407,7 +1407,16 @@ RESPONSES = {
   -- query_data passes res.data through str2lua, so data must be a Lua table
   -- literal string. Empty table = "nothing available offline", which each
   -- caller already handles (it is also what an empty server pool returns).
-  ["QUERY.ACHIEVEMENT"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  -- Server-wide achievements (QueryData.achievement[type].data[key]); offline
+  -- the only server is this player, so the chest total mirrors their count.
+  ["QUERY.ACHIEVEMENT"] = function(data)
+    local rec = {}
+    if tostring(tbl(data).type) == "CHEST" then
+      local act = moduleState("ACTIVITY")
+      rec.count = tonumber(tbl(act.c).c) or 0
+    end
+    return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = rec }) }
+  end,
   -- activity_module_chest reads activity_pool.CHEST.data.id (an activity_chest
   -- row) to find its exchange table; only the CHEST activity runs offline.
   -- Player chest state is ACTIVITY.c {el = exchange level, erc = 4-bit
