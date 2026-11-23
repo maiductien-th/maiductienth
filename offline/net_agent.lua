@@ -2822,6 +2822,46 @@ if MENU_BUILD then
       gm.PresetCMD = function() return PRESET end
       gm.__offline_menu = true
     end
+    if not Menu.__translated then
+      Menu.__translated = pcall(Menu.TranslatePanel)
+    end
+  end
+  -- The GM console (C# GMPanel prefab under GMManger.Instance) ships with
+  -- Chinese button labels; it exists (inactive) from startup.
+  local PANEL_VI = {
+    { "Alt：补全代码", "Nhập lệnh Lua..." },
+    { "保存为：", "Tên:" },
+    { "保存指令", "Lưu lệnh" },
+    { "上一条", "Lệnh trước" },
+    { "下一条", "Lệnh sau" },
+    { "执行", "Chạy" },
+    { "删除指令", "Xoá lệnh" },
+    { "关闭", "Đóng" },
+    { "删除GM记录", "Xoá lịch sử" },
+    { "查看报错", "Xem lỗi" },
+    { "角色数据S/L", "Dữ liệu NV" },
+    { "Enter text...", "Tên lệnh..." },
+  }
+  local function translate(text)
+    for _, kv in ipairs(PANEL_VI) do
+      local i = text:find(kv[1], 1, true)
+      if i == 1 and kv[1]:sub(1, 3) == "Alt" then return kv[2] end
+      if i then text = text:sub(1, i - 1) .. kv[2] .. text:sub(i + #kv[1]) end
+    end
+    return text
+  end
+  function Menu.TranslatePanel()
+    local root = _ENV.Slua.GetClass("GMManger").Instance.GM_Panel.transform
+    local function walk(tr)
+      local t = tr.gameObject:GetComponent("Text")
+      if t then
+        local cur = tostring(t.text)
+        local vi = translate(cur)
+        if vi ~= cur then t.text = vi end
+      end
+      for i = 0, tr.childCount - 1 do walk(tr:GetChild(i)) end
+    end
+    walk(root)
   end
 end
 
