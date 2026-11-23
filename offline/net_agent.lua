@@ -2233,11 +2233,22 @@ local function patchLang()
   lang.__offline_lang = true
 end
 
+-- BindAccountOpenChecker (C#) opens the "Link with" Google/Facebook panel on
+-- every main-scene entry for guest logins unless the local int
+-- stop_bind_open_checker is 1. Offline there is nothing to link, and the panel
+-- can cover the target of an active guide step, leaving the guide stuck.
+local function stopBindPanel()
+  if NetAgent.__offline_nobind then return end
+  local ok = pcall(function() _ENV.GameHelper.SetLocalInt("stop_bind_open_checker", 1) end)
+  NetAgent.__offline_nobind = ok
+end
+
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
   patchCustomData()
   patchEquipDecompose()
   patchLang()
+  stopBindPanel()
   if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
   local res, _, sync = offlineResponse(group, name, data)
   local agent = self
