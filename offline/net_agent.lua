@@ -238,7 +238,8 @@ local function initState()
   -- GetWdayIndex returns -1 for wday 0 and FrontLinePanel then indexes
   -- out of range.
   if type(st.FRONTLINE) == "table" then
-    local wday = os.date("*t").wday
+    -- Frontline rounds roll over at 04:00 (FrontLineModule.GetResetTime).
+    local wday = os.date("*t", os.time() - 4 * 3600).wday
     local round = wday == 1 and 3 or (wday - 2) // 2
     local fd = tonumber(st.FRONTLINE.fd) or 0
     st.FRONTLINE.fd = (fd & ~(0x1F << 8)) | (wday << 8) | (round << 11)
