@@ -97,8 +97,14 @@ PY
   ASSETS="$ASSETS assets/scg.ab"
 fi
 
+# The Play Core review library is not in the APK, so AndroidUtils.InAppReview
+# throws NoClassDefFoundError every frame after the 2-2 win and the game never
+# leaves the loading screen. Make it a no-op.
+unzip -o -q "$APK" classes8.dex -d "$TMP"
+python3 "$ROOT/tools/dex_noop.py" "$TMP/classes8.dex" 'Lcom/fattoy/library/AndroidUtils;' InAppReview
+
 cp -f "$APK" "$OUT.tmp"
-(cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" $ASSETS)
+(cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" $ASSETS && zip -q "$OLDPWD/$OUT.tmp" classes8.dex)
 "$ZIPALIGN" -f -p 4 "$OUT.tmp" "$OUT.aligned"
 "$APKSIGNER" sign --ks "$KS" --ks-pass env:KS_PASS --out "$OUT" "$OUT.aligned"
 rm -f "$OUT.tmp" "$OUT.aligned" "$OUT.aligned.idsig"
