@@ -1136,6 +1136,70 @@ local function lotteryPool()
   end
   return common, rare
 end
+local function hunterLevelRow(lv)
+  for _, r in ipairs(_ENV.ConfigMgr:GetConfig("hunter_level_reward") or {}) do
+    if tonumber(r.level) == lv then return r end
+  end
+end
+
+local function hunterLevel(h)
+  return math.max(1, math.floor(tonumber(h.hd) or 1) & 1023)
+end
+
+-- Total exp decides the level: the highest row whose total_exp is reached.
+local function hunterAddExp(h, n)
+  local hd = math.floor(tonumber(h.hd) or 1)
+  local exp = ((hd >> 11) & 2097151) + n
+  local lv = 1
+  for _, r in ipairs(_ENV.ConfigMgr:GetConfig("hunter_level_reward") or {}) do
+    if exp >= (tonumber(r.total_exp) or math.huge) then lv = math.max(lv, math.floor(tonumber(r.level) or 1)) end
+  end
+  h.hd = (exp << 11) | (hd & 1024) | lv
+end
+
+local function hunterFill(h)
+  h.bl = tbl(h.bl)
+  local maxN = 6
+  pcall(function() maxN = tonumber(_ENV.HunterModule:GetMaxBountyCount()) or maxN end)
+  local row = hunterLevelRow(hunterLevel(h)) or {}
+  local limit = math.max(1, math.floor(tonumber(row.difficulty_limit) or 1))
+  local lucky = tonumber(row.lucky_rate) or 0
+  local pool = {}
+  for id, c in pairs(_ENV.ConfigMgr:GetConfig("bounty") or {}) do
+    if type(c) == "table" and (tonumber(c.star) or 99) <= limit then pool[#pool + 1] = tostring(c.id or id) end
+  end
+  table.sort(pool)
+  local n = 0
+  for _ in pairs(h.bl) do n = n + 1 end
+  while n < maxN and #pool > 0 do
+    h.i = math.floor(tonumber(h.i) or 0) + 1
+    h.bl[tostring(h.i)] = { t = pool[math.random(#pool)], l = (math.random() * 100 < lucky) and 1 or 0, c = 0 }
+    n = n + 1
+  end
+  h.nrt = 0
+end
+
+local function hunterPayout(h, id)
+  local b = h.bl[id]
+  local entries = {}
+  local ok, list = pcall(function() return _ENV.HunterModule:GetHunterReward(id) end)
+  if ok and type(list) == "table" then entries = rewardEntries(list) end
+  if #entries == 0 then
+    local cfg = tbl(tbl(_ENV.ConfigMgr:GetConfig("bounty"))[b.t])
+    entries = rewardEntries((tonumber(b.l) or 0) == 1 and cfg.LuckyCompleteReward or cfg.CompleteReward)
+  end
+  if #entries == 0 or not rewardsGrantable(entries) then return failRes("HUNTER payout " .. id .. " reward unresolved") end
+  local star = math.max(1, math.floor(tonumber(tbl(tbl(_ENV.ConfigMgr:GetConfig("bounty"))[b.t]).star) or 1))
+  local sync = { HUNTER = h }
+  h.bl[id] = nil
+  hunterAddExp(h, star * 4)
+  local hrd = math.floor(tonumber(h.hrd) or 0)
+  h.hrd = ((math.min(65535, ((hrd >> 16) & 65535) + star * 10)) << 16) | (hrd & 65535)
+  local reward = grantRewards(entries, sync)
+  print("[OFFLINE] HUNTER payout " .. id .. " " .. tostring(b.t) .. " reward=" .. ser(reward) .. " hd=" .. h.hd)
+  return okRes({ reward = reward }), sync
+end
+
 local RESPONSES
 RESPONSES = {
   -- CHECK_SERVER_CONFIG response { result 0 : *DictionaryStr }: no overrides.
@@ -1379,6 +1443,7 @@ RESPONSES = {
     st.rid = _ENV.ConfigMgr:GetRoomId(stage, 1) or ""
     st.room = 1
     st.time = 0
+    st.bounty = type(data.params) == "table" and data.params.bounty_id or nil
     local sync = { BATTLE = st }
     local scfg = _ENV.ConfigMgr:GetStageConfig(stage)
     for _, c in ipairs(rewardEntries(seq(type(scfg) == "table" and scfg.cost))) do
@@ -1439,12 +1504,19 @@ RESPONSES = {
     data = type(data) == "table" and data or {}
     local sync = { BATTLE = moduleDefaults("BATTLE") }
     local deaths = tonumber(NetAgent.battle and NetAgent.battle.vi and NetAgent.battle.vi.dt) or 0
+    local bountyId = NetAgent.battle and NetAgent.battle.bounty
     NetAgent.battle = nil
     local stars, starReward, reward = 0, {}, {}
     local names = _ENV.BattleModule and _ENV.BattleModule.BATTLE_RESULT
     local result = data.result
     local won = result == 1 or result == "VICTORY" or (type(names) == "table" and names[result] == "VICTORY")
         print("[OFFLINE] OVER stage=" .. tostring(data.stage_id) .. " result=" .. tostring(result) .. " won=" .. tostring(won) .. " coin=" .. tostring(data.coin))
+    if won and bountyId then
+      local h = moduleState("HUNTER")
+      h.bl = tbl(h.bl)
+      local b = h.bl[tostring(bountyId)]
+      if type(b) == "table" then b.c = 1 sync.HUNTER = h end
+    end
     if won then
       local eco = moduleState("ECO")
       eco.d = type(eco.d) == "table" and eco.d or {}
@@ -1662,6 +1734,76 @@ RESPONSES = {
       reward_id = list[indexes[1]], id = list[indexes[1]] }), sync
   end,
   ["LOTTERY.RESET_LOTTERY"] = function() return okRes() end,
+  -- hunter_module: HUNTER.hd packs level (bits 0-9) and total exp (bits
+  -- 11-31); bl maps a bounty uid to { t = bounty config id, l = lucky,
+  -- c = completed }. dr is the daily-reward flag, lrl the claimed-level bits.
+  ["HUNTER.REQUEST_BOUNTY"] = function()
+    local h = moduleState("HUNTER")
+    hunterFill(h)
+    print("[OFFLINE] HUNTER.REQUEST_BOUNTY bl=" .. ser(h.bl))
+    return okRes(), { HUNTER = h }
+  end,
+  ["HUNTER.REFRESH_BOUNTY"] = function(data)
+    local id = tostring(tbl(data).id or "")
+    local h = moduleState("HUNTER")
+    h.bl = tbl(h.bl)
+    if not h.bl[id] then return failRes("HUNTER.REFRESH_BOUNTY unknown " .. id) end
+    h.bl[id] = nil
+    hunterFill(h)
+    return okRes(), { HUNTER = h }
+  end,
+  ["HUNTER.ABANDON_BOUNTY"] = function(data)
+    local h = moduleState("HUNTER")
+    h.bl = tbl(h.bl)
+    h.bl[tostring(tbl(data).id or "")] = nil
+    return okRes(), { HUNTER = h }
+  end,
+  ["HUNTER.CLAIM_REWARD"] = function(data)
+    local id = tostring(tbl(data).id or "")
+    local h = moduleState("HUNTER")
+    local b = tbl(tbl(h.bl)[id])
+    if (tonumber(b.c) or 0) ~= 1 then return failRes("HUNTER.CLAIM_REWARD " .. id .. " not completed") end
+    return hunterPayout(h, id)
+  end,
+  ["HUNTER.SWEEP_BOUNTY"] = function(data)
+    local id = tostring(tbl(data).id or "")
+    local h = moduleState("HUNTER")
+    if not tbl(h.bl)[id] then return failRes("HUNTER.SWEEP_BOUNTY unknown " .. id) end
+    local ok, can = pcall(function() return _ENV.HunterModule:IsCanSweepBounty(id) end)
+    if ok and can == 0 then return failRes("HUNTER.SWEEP_BOUNTY " .. id .. " not sweepable") end
+    return hunterPayout(h, id)
+  end,
+  ["HUNTER.CLAIM_DAILY_REWARD"] = function()
+    local h = moduleState("HUNTER")
+    if (tonumber(h.dr) or 0) ~= 0 then return failRes("HUNTER.CLAIM_DAILY_REWARD already claimed") end
+    local row = hunterLevelRow(hunterLevel(h))
+    local entries = rewardEntries(row and row.daily_reward)
+    if #entries == 0 or not rewardsGrantable(entries) then return failRes("HUNTER.CLAIM_DAILY_REWARD no reward") end
+    local sync = { HUNTER = h }
+    h.dr = 1
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] HUNTER.CLAIM_DAILY_REWARD reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  ["HUNTER.CLAIM_LEVEL_REWARD"] = function()
+    local h = moduleState("HUNTER")
+    h.lrl = tbl(h.lrl)
+    local lv, entries, levels = hunterLevel(h), {}, {}
+    for _, r in ipairs(_ENV.ConfigMgr:GetConfig("hunter_level_reward") or {}) do
+      local l = math.floor(tonumber(r.level) or 0)
+      if l > 1 and l <= lv and getBits(h.lrl, l, 1) == 0 then
+        levels[#levels + 1] = l
+        for _, e in ipairs(rewardEntries(r.daily_reward)) do entries[#entries + 1] = e end
+      end
+    end
+    if #levels == 0 or not rewardsGrantable(entries) then return failRes("HUNTER.CLAIM_LEVEL_REWARD nothing to claim") end
+    local sync = { HUNTER = h }
+    for _, l in ipairs(levels) do setBits(h.lrl, l, 1, 1) end
+    local reward = grantRewards(entries, sync)
+    return okRes({ reward = reward }), sync
+  end,
+  ["HUNTER.RESET"] = function() return okRes() end,
+  ["HUNTER.CONFIRM"] = function() return okRes() end,
   -- PrizeWheelPanel (Arch wheel) spins through SendRequest4CS HUNTER.START_WHEEL
   -- with the hunter pool type; draws share the LOTTERY wheel logic.
   ["HUNTER.START_WHEEL"] = function(data)
@@ -2239,7 +2381,9 @@ RESPONSES = {
     shop.tph = {}
     shop.tsl = {}
     ensureShops(shop)
-    return okRes(), { PLAYER = p, SHOP = shop }
+    local h = moduleState("HUNTER")
+    h.dr = 0
+    return okRes(), { PLAYER = p, SHOP = shop, HUNTER = h }
   end,
 
   -- Offline there is no ad network. GM.f carries GameDef.FLAG.NO_AD, which
@@ -2512,6 +2656,17 @@ end
 -- BoxPanel still shows COMMON.equip_mail ("inventory full, stored in the
 -- mailbox") unless a reward is a "myequip" entry, which the box reward icons
 -- cannot draw, so reword that tip instead.
+-- Menu build: every feature gated by a stage requirement opens at once.
+local function unlockAllModules()
+  local gd = _ENV.GameDef
+  if not MENU_BUILD or type(gd) ~= "table" or gd.__offline_unlock then return end
+  if type(gd.MODULE_UNLOCK_STAGE) == "table" then
+    for k in pairs(gd.MODULE_UNLOCK_STAGE) do gd.MODULE_UNLOCK_STAGE[k] = 0 end
+  end
+  if tonumber(gd.HEROIC_UNLOCK_STAGE) then gd.HEROIC_UNLOCK_STAGE = 0 end
+  gd.__offline_unlock = true
+end
+
 local function patchLang()
   local lang = _ENV.LANG
   if type(lang) ~= "table" or lang.__offline_lang or type(lang.GetTextData) ~= "function" then return end
@@ -2541,6 +2696,7 @@ function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
   patchCustomData()
   patchEquipDecompose()
+  unlockAllModules()
   patchLang()
   stopBindPanel()
   if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
