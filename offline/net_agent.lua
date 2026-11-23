@@ -651,6 +651,7 @@ end
 -- No client config holds the server's shop roll; one entry per pool is
 -- picked by weight, with no discount (DISCOUNT_ENUM index 1 = 100%).
 local POOL_SHOPS = { "coin", "gem", "tb" }
+local dynamicShopRows
 local function noDiscountIndex()
   local de = _ENV.GameDef and _ENV.GameDef.DISCOUNT_ENUM
   if type(de) == "table" then
@@ -687,6 +688,36 @@ local function rollShop(shopType)
     setBits(slot.d, bi, 4, dn)
   end
   return slot
+end
+-- Dynamic shops (shop_module_dynamic): the server sends QueryData
+-- dynamic_shop[type] = {data = {{reward, price, limit, limitType}, ...}},
+-- the item id is the reward string, and purchases are counted in
+-- SHOP.dph[type].h[id] (no limitType) or dph[type][limitType].c[id].
+local function itemStr(v)
+  if type(v) == "string" then return v end
+  local parts = {}
+  for _, e in ipairs(rewardEntries(v)) do
+    parts[#parts + 1] = e.id .. "|" .. math.floor(e.count) .. (e.args and ("|" .. tostring(e.args)) or "")
+  end
+  return table.concat(parts, ";")
+end
+dynamicShopRows = function(shopType)
+  local list = {}
+  for _, r in pairs(_ENV.ConfigMgr:GetConfig("shop") or {}) do
+    if type(r) == "table" and r.shop == shopType and (tonumber(r.hide) or 0) == 0
+        and (tonumber(r.bitIndex) or 0) > 0 and r.reward ~= nil and r.price ~= nil then
+      list[#list + 1] = r
+    end
+  end
+  table.sort(list, function(a, b) return tonumber(a.bitIndex) < tonumber(b.bitIndex) end)
+  local rows = {}
+  for _, r in ipairs(list) do
+    local lt = r.limitType
+    if lt == "" then lt = nil end
+    rows[#rows + 1] = { cfg = r, reward = itemStr(r.reward), price = itemStr(r.price),
+      limit = math.floor(tonumber(r.dailyLimit) or 999), limitType = lt }
+  end
+  return rows
 end
 local function ensureShops(shop)
   shop.tsl = tbl(shop.tsl)
@@ -840,7 +871,17 @@ local RESPONSES = {
   ["QUERY.ACHIEVEMENT"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
   ["QUERY.SYNC_ACTIVITY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
   ["QUERY.LOTTERY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
-  ["QUERY.DYNAMIC_SHOP"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  ["QUERY.DYNAMIC_SHOP"] = function(data)
+    local t = tostring(tbl(data).type or "")
+    local rows = {}
+    for _, r in ipairs(dynamicShopRows(t)) do
+      rows[#rows + 1] = { reward = r.reward, price = r.price, limit = r.limit, limitType = r.limitType }
+    end
+    local now = 0
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or 0 end)
+    print("[OFFLINE] QUERY.DYNAMIC_SHOP " .. t .. " items=" .. #rows .. " now=" .. now)
+    return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = rows, next_time = now + 86400 }) }
+  end,
   ["QUERY.EQUIP_DYNAMIC_POOL"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
   -- query_data iterates res.result as a list of invitee records.
   ["QUERY.INVITEE"] = function() return { ret_code = protoCode("SUCCESS", 1), result = {} } end,
@@ -956,22 +997,22 @@ local RESPONSES = {
     local hero = moduleState("HERO")
     hero.hl = type(hero.hl) == "table" and hero.hl or {}
     local cur = type(hero.hl[id]) == "table" and (tonumber(hero.hl[id].l) or 1) or nil
-    local ok, coin, mat = pcall(function() return _ENV.ConfigMgr:GetHeroLevelupCost(id, level) end)
-    coin, mat = tonumber(coin), tonumber(mat)
-    local ids = _ENV.GameDef.ITEM_ID or {}
-    local eco = moduleState("ECO")
-    eco.d = type(eco.d) == "table" and eco.d or {}
-    local cid, mid = ids.COIN or "coin", ids.HERO_LEVELUP_MATERIAL
-    if not cur or level ~= cur + 1 or not ok or not coin or not mat or not mid
-        or (tonumber(eco.d[cid]) or 0) < coin or (tonumber(eco.d[mid]) or 0) < mat then
-      print("[OFFLINE] HERO.LEVELUP rejected id=" .. id .. " level=" .. level)
-      return { ret_code = protoCode("FAIL", 0) }
+    -- hero_module.GetCurrentHeroLevelupCost prices the next level as
+    -- GetLevelupCost(id, level + 1) -> ConfigMgr:GetHeroLevelupCost(level + 1).
+    -- The UI sends the level the hero is at now; accept the target too.
+    if not cur or (level ~= cur and level ~= cur + 1) then
+      return failRes("HERO.LEVELUP id=" .. id .. " level=" .. level .. " cur=" .. tostring(cur))
     end
-    eco.d[cid] = eco.d[cid] - coin
-    eco.d[mid] = eco.d[mid] - mat
-    hero.hl[id].l = level
-    print("[OFFLINE] HERO.LEVELUP " .. id .. " -> " .. level .. " coin-" .. coin .. " " .. tostring(mid) .. "-" .. mat)
-    return { ret_code = protoCode("SUCCESS", 1) }, { HERO = hero, ECO = eco }
+    local ok, costs = pcall(function() return _ENV.HeroModule:GetLevelupCost(id, cur + 1) end)
+    if not ok or type(costs) ~= "table" or next(costs) == nil then
+      return failRes("HERO.LEVELUP no cost for level " .. (cur + 1) .. " " .. tostring(costs))
+    end
+    local sync = { HERO = hero }
+    local paid, short = spend(sync, costs)
+    if not paid then return failRes("HERO.LEVELUP short of " .. tostring(short)) end
+    hero.hl[id].l = cur + 1
+    print("[OFFLINE] HERO.LEVELUP " .. id .. " " .. cur .. " -> " .. (cur + 1) .. " cost=" .. ser(costs))
+    return { ret_code = protoCode("SUCCESS", 1) }, sync
   end,
 
   ["BATTLE.START"] = function(data)
@@ -1131,9 +1172,6 @@ local RESPONSES = {
     local sync = { SHOP = shop }
     local price = tbl(cfg.price)
     local pid = tostring(price.id or "")
-    if pid == "rmb" then
-      return failRes("SHOP.PURCHASE " .. id .. " is a real-money item; no billing offline")
-    end
     if pid ~= "video" and pid ~= "" then
       local disc = 100
       pcall(function()
@@ -1149,6 +1187,49 @@ local RESPONSES = {
     print("[OFFLINE] SHOP.PURCHASE " .. id .. " x" .. count .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
   end,
+  ["SHOP.PURCHASE_DYNAMIC"] = function(data)
+    data = tbl(data)
+    local t, id = tostring(data.type or ""), tostring(data.id or "")
+    local count = math.max(1, math.floor(tonumber(data.count) or 1))
+    local row = dynamicShopRows(t)[math.floor(tonumber(data.index) or 0)]
+    if not row or row.reward ~= id then
+      return failRes("SHOP.PURCHASE_DYNAMIC " .. t .. " no item " .. id .. " at " .. tostring(data.index))
+    end
+    local shop = moduleState("SHOP")
+    shop.dph = tbl(shop.dph)
+    local d = tbl(shop.dph[t])
+    local bucket
+    if row.limitType then
+      d[row.limitType] = tbl(d[row.limitType]); d[row.limitType].c = tbl(d[row.limitType].c)
+      bucket = d[row.limitType].c
+    else
+      d.h = tbl(d.h); bucket = d.h
+    end
+    if (tonumber(bucket[id]) or 0) + count > row.limit then
+      return failRes("SHOP.PURCHASE_DYNAMIC limit " .. id)
+    end
+    local entries = {}
+    for _ = 1, count do
+      for _, e in ipairs(rewardEntries(row.reward)) do entries[#entries + 1] = e end
+    end
+    local grantable, missing = rewardsGrantable(entries)
+    if not grantable then
+      return failRes("SHOP.PURCHASE_DYNAMIC " .. id .. " reward not supported offline: " .. tostring(missing))
+    end
+    local sync = { SHOP = shop }
+    local costs = {}
+    for _, e in ipairs(rewardEntries(row.price)) do
+      costs[e.id] = (costs[e.id] or 0) + math.floor(e.count) * count
+    end
+    local paid, short = spend(sync, costs)
+    if not paid then return failRes("SHOP.PURCHASE_DYNAMIC " .. id .. " short of " .. tostring(short)) end
+    bucket[id] = (tonumber(bucket[id]) or 0) + count
+    shop.dph[t] = d
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] SHOP.PURCHASE_DYNAMIC " .. t .. " " .. id .. " x" .. count .. " cost=" .. ser(costs))
+    return okRes({ reward = reward }), sync
+  end,
+  ["SHOP.RESET_DYNAMIC"] = function() return okRes() end,
   -- energy_module.CheckIncrease asks once the next point is due.
   ["ENERGY.INCREASE"] = function()
     local en = moduleState("ENERGY")
@@ -1242,7 +1323,7 @@ local RESPONSES = {
     end
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] OPEN_BOX " .. boxId .. " x" .. count .. " reward=" .. ser(reward))
-    return okRes({ reward = reward, result = 0 }), sync
+    return okRes({ reward = reward }), sync
   end,
 
   -- equip_module.RequestEnhance / RequestAscend send {id = equipment uid,
@@ -1567,7 +1648,7 @@ if MENU_BUILD then
     local before = tonumber(eco.d[id]) or 0
     eco.d[id] = math.min(CAP, before + amount)
     fireSync(NetAgent, { ECO = eco })
-    tip(id .. " " .. before .. " -> " .. eco.d[id])
+    tip("+" .. amount .. " " .. (NAMES[id] or id) .. ": " .. before .. " -> " .. eco.d[id])
   end
   function Menu.UnlockSkins()
     local pl = moduleState("PLAYER")
@@ -1584,77 +1665,29 @@ if MENU_BUILD then
     pl.sl = sl
     fireSync(NetAgent, { PLAYER = pl })
     pcall(function() _ENV.Event:FireEvent(NetAgent, "SKIN.CHANGED") end)
-    tip("unlocked skins: " .. n)
+    tip("Đã mở khóa " .. n .. " skin")
   end
 
-  -- One hit: the C# battle computes damage itself (battle_calculator's
-  -- GetDamageResult only verifies it), but it reads its character table
-  -- through ConfigMgr:loadCfgFile4CS. With one hit on, every non-hero unit
-  -- is handed to it with maxHp 1.
-  local ALLY_TYPES = { hero = true, pet = true, phantom = true, npc = true }
-  local typesLogged = false
-  local function onehitCharacters(data)
-    if type(data) ~= "table" then return data end
-    local out, n, types = {}, 0, {}
-    for id, row in pairs(data) do
-      local t = type(row) == "table" and tostring(row.type or "") or ""
-      types[t] = true
-      if type(row) == "table" and not ALLY_TYPES[t] and not tostring(id):match("^hero")
-          and (tonumber(row.maxHp) or 0) > 1 then
-        local c = {}
-        for k, v in pairs(row) do c[k] = v end
-        c.maxHp = 1
-        out[id] = c
-        n = n + 1
-      else
-        out[id] = row
-      end
-    end
-    if not typesLogged then
-      typesLogged = true
-      local ts = {}
-      for t in pairs(types) do ts[#ts + 1] = t end
-      print("[OFFLINE-MENU] onehit character rows=" .. n .. " types=" .. table.concat(ts, ","))
-    end
-    return out
-  end
-  local function reloadBattleConfig()
-    local gh = _ENV.GameHelper
-    if gh and gh.ReloadConfig then
-      local ok, err = pcall(gh.ReloadConfig)
-      print("[OFFLINE-MENU] ReloadConfig " .. tostring(ok) .. " " .. tostring(err))
-    end
-  end
-  function Menu.InstallOneHit()
-    local cm = _ENV.ConfigMgr
-    if type(cm) ~= "table" or cm.__offline_onehit or type(cm.loadCfgFile4CS) ~= "function" then return end
-    local orig = cm.loadCfgFile4CS
-    cm.loadCfgFile4CS = function(self, name, ...)
-      local r = orig(self, name, ...)
-      print("[OFFLINE-MENU] loadCfgFile4CS " .. tostring(name))
-      if name == "character" and cheats().onehit then r = onehitCharacters(r) end
-      return r
-    end
-    cm.__offline_onehit = true
-    if cheats().onehit then reloadBattleConfig() end
-  end
-  function Menu.ToggleOneHit()
-    local c = cheats()
-    c.onehit = not c.onehit
-    saveState()
-    if _ENV.ConfigMgr and _ENV.ConfigMgr.__offline_onehit then reloadBattleConfig() else Menu.InstallOneHit() end
-    tip("one hit " .. (c.onehit and "ON" or "OFF"))
-  end
-
-  local PRESET = {
-    { "+99999999 Vang (coin)", "OfflineMenu.AddResource('coin', 99999999)" },
-    { "+99999999 Zeno (rmb)", "OfflineMenu.AddResource('rmb', 99999999)" },
-    { "+99999999 Quang luc lam (stone)", "OfflineMenu.AddResource('stone', 99999999)" },
-    { "Unlock all skins", "OfflineMenu.UnlockSkins()" },
-    { "One hit ON/OFF", "OfflineMenu.ToggleOneHit()" },
+  -- One hit is built into the menu APK: tools/csv_onehit.py rewrites the
+  -- character table in assets/scg.ab so every monster and boss has maxHp 1.
+  -- Patching the table at runtime (loadCfgFile4CS + ReloadConfig) did not
+  -- reach the C# battle, which keeps its own copy.
+  local NAMES = {
+    coin = "Vàng", rmb = "Zeno", stone = "Quặng lục lam", gem = "Đá quý",
+    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP",
   }
+  local PRESET = {
+    { "+99999999 Vàng", "OfflineMenu.AddResource('coin', 99999999)" },
+    { "+99999999 Zeno", "OfflineMenu.AddResource('rmb', 99999999)" },
+    { "+99999999 Quặng lục lam", "OfflineMenu.AddResource('stone', 99999999)" },
+    { "+99999999 Đá quý", "OfflineMenu.AddResource('gem', 99999999)" },
+    { "+99999999 Lõi vũ khí", "OfflineMenu.AddResource('core_weapon', 99999999)" },
+    { "+99999999 Viên nang XP (lên cấp)", "OfflineMenu.AddResource('capsule', 99999999)" },
+    { "Mở khóa tất cả skin", "OfflineMenu.UnlockSkins()" },
+    { "One hit: luôn bật (1 đòn chết quái)", "OfflineMenu.OneHitInfo()" },
+  }
+  function Menu.OneHitInfo() tip("One hit luôn bật trong bản menu: quái và boss chỉ có 1 máu") end
   function Menu.Patch()
-    Menu.InstallOneHit()
     -- The GM flag that enables the menu also turns on the developer error
     -- overlay (GMModule:IsOpenView); keep the menu, drop the overlay.
     local gmm = _ENV.GMModule

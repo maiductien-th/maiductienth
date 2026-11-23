@@ -56,8 +56,41 @@ open(bundle_path, "wb").write(ab_pack.build(serialized, orig))
 print("rebuilt", bundle_path)
 PY
 
+ASSETS="assets/scp.ab"
+if [ "${MENU:-0}" = 1 ]; then
+  # One hit: every monster/boss row of the character table gets maxHp 1.
+  unzip -o -q "$APK" assets/scg.ab -d "$TMP"
+  PYTHONPATH="$(dirname "$0")" python3 - "$TMP/assets/scg.ab" <<'PY'
+import sys, warnings
+import UnityPy
+import ab_pack, csv_onehit
+warnings.filterwarnings("ignore")
+path = sys.argv[1]
+orig = open(path, "rb").read()
+env = UnityPy.load(ab_pack.decode(orig))
+for obj in env.objects:
+    if obj.type.name != "TextAsset":
+        continue
+    ta = obj.read()
+    if ta.m_Name == "character":
+        raw = ta.m_Script
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", "surrogateescape")
+        new, n = csv_onehit.patch_compressed(raw)
+        ta.m_Script = new.decode("utf-8", "surrogateescape")
+        ta.save()
+        print("one hit: character rows patched:", n)
+        break
+else:
+    raise SystemExit("character TextAsset not found in scg.ab")
+serialized = list(env.file.files.values())[0].save()
+open(path, "wb").write(ab_pack.build(serialized, orig))
+PY
+  ASSETS="$ASSETS assets/scg.ab"
+fi
+
 cp -f "$APK" "$OUT.tmp"
-(cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" assets/scp.ab)
+(cd "$TMP" && zip -q -0 "$OLDPWD/$OUT.tmp" $ASSETS)
 "$ZIPALIGN" -f -p 4 "$OUT.tmp" "$OUT.aligned"
 "$APKSIGNER" sign --ks "$KS" --ks-pass env:KS_PASS --out "$OUT" "$OUT.aligned"
 rm -f "$OUT.tmp" "$OUT.aligned" "$OUT.aligned.idsig"
