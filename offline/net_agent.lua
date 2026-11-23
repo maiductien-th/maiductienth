@@ -1545,22 +1545,28 @@ RESPONSES = {
     local function add(list)
       for _, e in ipairs(rewardEntries(list)) do entries[#entries + 1] = e end
     end
+    -- damage_state: bit 0 a kill (client shows the reward stream), bit 1 a crit.
+    local ds = 0
     for _ = 1, count do
       local dmg = atk
-      if math.random(100) <= chc then dmg = math.floor(atk * chd / 1000) end
+      if math.random(100) <= chc then
+        dmg = math.floor(atk * chd / 1000)
+        ds = ds | 2
+      end
       add(chest.atk_reward)
       hp = hp - dmg
       if hp <= 0 then
         add(chest.kill_reward)
         add(chest.kill_fix_reward)
         hp = maxHp
+        ds = ds | 1
       end
     end
     act.c.hp = hp
     act.c.c = (tonumber(act.c.c) or 0) + count
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] ACTIVITY.ATTACK_CHEST x" .. count .. " hp=" .. hp .. " c=" .. act.c.c)
-    return okRes({ reward = reward, hp = hp, damage_state = 0 }), sync
+    return okRes({ reward = reward, hp = hp, damage_state = ds }), sync
   end,
   ["ACTIVITY.CLAIM_CHEST_ACHV_REWARD"] = function(data)
     data = tbl(data)
