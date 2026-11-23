@@ -1375,6 +1375,35 @@ RESPONSES = {
   -- potential_module CheckIncrease / CheckIncreaseTicket ask the server to
   -- apply time-based regen; nothing regenerates offline beyond the synced state.
   ["POTENTIAL.INCREASE"] = function() return okRes() end,
+  -- pig_bank_module.CheckNext (lua:55-69) sends PIG_BANK.CHECK_NEXT when no
+  -- bank is open (i <= 0) or the open one is older than PIGGY_BANK_DURATION;
+  -- success fires PIG_BANK_RESET. The first one goes out on the lobby load
+  -- after the stage that unlocks the bank, so an unanswered request leaves
+  -- that load on the loading screen. Opening the next bank: index i + 1,
+  -- start time st, empty savings cs/ts.
+  ["PIG_BANK.CHECK_NEXT"] = function()
+    local pb = moduleState("PIG_BANK")
+    pb.i = math.max(0, math.floor(tonumber(pb.i) or 0)) + 1
+    pb.st, pb.cs, pb.ts = os.time(), 0, 0
+    return okRes(), { PIG_BANK = pb }
+  end,
+  -- CLAIM_REWARD pays out the saved gems (cs) and marks bank i claimed in
+  -- the pl bitset (GetBitValue(pl, i, 1): word ceil(i/32), bit (i-1)%32).
+  ["PIG_BANK.CLAIM_REWARD"] = function()
+    local pb = moduleState("PIG_BANK")
+    local i = math.floor(tonumber(pb.i) or 0)
+    if i <= 0 then return failRes("PIG_BANK.CLAIM_REWARD no bank") end
+    pb.pl = tbl(pb.pl)
+    local w, b = (i - 1) // 32 + 1, (i - 1) % 32
+    for k = 1, w do pb.pl[k] = tonumber(pb.pl[k]) or 0 end
+    if (pb.pl[w] >> b) & 1 == 1 then return failRes("PIG_BANK.CLAIM_REWARD claimed") end
+    pb.pl[w] = pb.pl[w] | (1 << b)
+    local sync = { PIG_BANK = pb }
+    local n = math.floor(tonumber(pb.cs) or 0)
+    local reward = n > 0 and grantRewards({ { id = "gem", count = n } }, sync) or {}
+    pb.cs = 0
+    return okRes({ reward = reward }), sync
+  end,
   ["POTENTIAL.INCREASE_TICKET"] = function() return okRes() end,
   ["QUERY.LOTTERY"] = function(data)
     local t = math.floor(tonumber(tbl(data).type) or 0)
