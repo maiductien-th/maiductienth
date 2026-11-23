@@ -2985,7 +2985,7 @@ local function patchCustomData()
 end
 
 -- BoxItemIcon asks EquipModule:IsDecomposition about each box reward. For a
--- gift_equip entry its params parse to a nil quality and GetEquipQuality
+-- gift_equip or drop_equip entry its params parse to a nil quality and GetEquipQuality
 -- throws, leaving the reward panel empty. A freshly granted piece is never
 -- pre-marked for auto decompose, so answer false for gift_equip.
 local function patchEquipDecompose()
@@ -2993,7 +2993,9 @@ local function patchEquipDecompose()
   if type(em) ~= "table" or em.__offline_dec or type(em.IsDecomposition) ~= "function" then return end
   local orig = em.IsDecomposition
   em.IsDecomposition = function(self, item, ...)
-    if type(item) == "table" and item.id == "gift_equip" then return false end
+    -- drop_equip params are template id << 16 | distribution, which this
+    -- reads as a base_value and gets a nil distribution.
+    if type(item) == "table" and (item.id == "gift_equip" or item.id == "drop_equip") then return false end
     return orig(self, item, ...)
   end
   em.__offline_dec = true
