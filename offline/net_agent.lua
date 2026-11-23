@@ -625,12 +625,15 @@ local function grantRewards(entries, sync)
       sync.VIP = sync.VIP or moduleState("VIP")
       sync.VIP.mc = type(sync.VIP.mc) == "table" and sync.VIP.mc or {}
       local c = type(sync.VIP.mc[cid]) == "table" and sync.VIP.mc[cid] or {}
+      -- ft is inclusive: a new card covers today + 29 days, an active one
+      -- extends 30 days past its current last day.
       local base = os.time()
       local ft = tonumber(c.ft) or 0
-      if ft >= tonumber(os.date("%Y%m%d", base)) then
+      local active = ft >= tonumber(os.date("%Y%m%d", base))
+      if active then
         base = os.time({ year = ft // 10000, month = ft // 100 % 100, day = ft % 100, hour = 12 })
       end
-      c.ft = tonumber(os.date("%Y%m%d", base + 30 * 86400 * n - (ft > 0 and 0 or 86400)))
+      c.ft = tonumber(os.date("%Y%m%d", base + 30 * 86400 * n - (active and 0 or 86400)))
       c.ccd = 1
       sync.VIP.mc[cid] = c
       shown[#shown + 1] = { id = id, count = n }
