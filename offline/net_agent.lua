@@ -3020,6 +3020,20 @@ local function unlockAllModules()
   if type(am) == "table" and type(am.CanEnterFate) == "function" then
     am.CanEnterFate = function() return 1 end
   end
+  -- CheckCondition components (the World tab's "complete Mission 2-1" lock)
+  -- ask condition_mgr's passStage, which compares AdventureModule:GetRecord().
+  local cnd = _ENV.ConditionMgr
+  if type(cnd) == "table" and type(cnd.CheckCondition) == "function" and type(cnd.GetValue) == "function" then
+    local check, value = cnd.CheckCondition, cnd.GetValue
+    cnd.CheckCondition = function(self, t, p, ...)
+      if t == "passStage" then return 1 end
+      return check(self, t, p, ...)
+    end
+    cnd.GetValue = function(self, t, p, ...)
+      if t == "passStage" then return 1, 1 end
+      return value(self, t, p, ...)
+    end
+  end
   -- item UseCondition {id = "passStage", param = N} (pay_pet_D: Mission 5)
   local cm = _ENV.ConfigMgr
   for _, c in pairs(cm and cm:GetConfig("item") or {}) do
