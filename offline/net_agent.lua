@@ -1008,8 +1008,9 @@ local POOL_SHOPS = { "coin", "gem", "rmb", "tb" }
 -- The Daily Deal exchange (dynamic shop "2") is priced in dsop, the points
 -- the daily deal packs give. Its catalogue only comes from the server, so
 -- offline it sells this fixed list: {reward, price, daily limit}.
--- Dynamic shop "1" is the Rewinding Treasure exchange (DynamicShopPanel with
--- WishPointsStoreItem rows), priced in wp, the wish points.
+-- Dynamic shop "1" is the Arch / Rewinding Treasure exchange (DynamicShopPanel
+-- with WishPointsStoreItem rows). Its "wp" prices are rewritten to the
+-- wish-points wheel's own cost item in dynamicShopRows.
 local DYNAMIC_FALLBACK = {
   ["1"] = {
     { "key_rare|1", "wp|300", 5 },
@@ -1099,8 +1100,16 @@ dynamicShopRows = function(shopType)
       limit = math.floor(tonumber(r.dailyLimit) or 999), limitType = lt }
   end
   if #rows == 0 and DYNAMIC_FALLBACK[shopType] then
+    local cur = "wp"
+    if shopType == "1" then
+      pcall(function()
+        local w = _ENV.GameDef.PRIZE_WHEEL_CONFIG[_ENV.GameDef.LOTTERY.wish_points]
+        if type(w) == "table" and type(w.cost) == "table" and w.cost.id then cur = tostring(w.cost.id) end
+      end)
+    end
     for i, r in ipairs(DYNAMIC_FALLBACK[shopType]) do
-      rows[i] = { reward = r[1], price = r[2], limit = r[3], limitType = 1, weight = i }
+      local price = r[2]:gsub("^wp|", cur .. "|")
+      rows[i] = { reward = r[1], price = price, limit = r[3], limitType = 1, weight = i }
     end
   end
   return rows
