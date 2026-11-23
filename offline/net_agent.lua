@@ -2024,8 +2024,13 @@ RESPONSES = {
     st.c = (tonumber(st.c) or 0) + count
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] LOTTERY.START_WHEEL " .. t .. " x" .. count .. " idx=" .. ser(indexes) .. " reward=" .. ser(reward))
+    -- BoxSoltMachine.RunWheel ipairs res.id and looks each reward string up
+    -- in its slot list to know where the spin stops; a plain string leaves
+    -- the wheel spinning forever. The Arch panel keeps the single string.
+    local ids = {}
+    for i, idx in ipairs(indexes) do ids[i] = list[idx] end
     return okRes({ reward = reward, index = indexes[1], indexes = indexes, result = indexes, type = t,
-      reward_id = list[indexes[1]], id = list[indexes[1]] }), sync
+      reward_id = list[indexes[1]], id = hunter and list[indexes[1]] or ids }), sync
   end,
   ["LOTTERY.RESET_LOTTERY"] = function() return okRes() end,
   -- hunter_module: HUNTER.hd packs level (bits 0-9) and total exp (bits
