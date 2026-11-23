@@ -233,6 +233,16 @@ local function initState()
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
+  -- FRONTLINE.fd is server-filled: bits 8-10 hold today's wday and bits
+  -- 11-12 the round (index into FRONTLINE_REFRESH_WDAY {2, 4, 6, 1}).
+  -- GetWdayIndex returns -1 for wday 0 and FrontLinePanel then indexes
+  -- out of range.
+  if type(st.FRONTLINE) == "table" then
+    local wday = os.date("*t").wday
+    local round = wday == 1 and 3 or (wday - 2) // 2
+    local fd = tonumber(st.FRONTLINE.fd) or 0
+    st.FRONTLINE.fd = (fd & ~(0x1F << 8)) | (wday << 8) | (round << 11)
+  end
   -- Real-money packs are bought with the "money" (voucher) resource when
   -- CanBuyProductByMoney allows it; offline that balance never runs out
   -- and ECO_PURCHASE does not charge it.
@@ -1478,7 +1488,14 @@ RESPONSES = {
     print("[OFFLINE] QUERY.DYNAMIC_SHOP " .. t .. " items=" .. #rows .. " now=" .. now)
     return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = rows, next_time = now + 86400 }) }
   end,
-  ["QUERY.EQUIP_DYNAMIC_POOL"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  -- server_config_mgr.QueryEquipPool keeps every response field except
+  -- ret_code/sync_list as the pool, and BoxPoolUpdateTip.CheckNeedQueryPool
+  -- unboxes its next_time; without it the chest screens throw.
+  ["QUERY.EQUIP_DYNAMIC_POOL"] = function()
+    local now = os.time()
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    return { ret_code = protoCode("SUCCESS", 1), next_time = now + 7 * 86400, week = 1 }
+  end,
   -- query_data iterates res.result as a list of invitee records.
   ["QUERY.INVITEE"] = function() return { ret_code = protoCode("SUCCESS", 1), result = {} } end,
   -- SERVER_PATCH response { version, patch, config_version, configs }:
