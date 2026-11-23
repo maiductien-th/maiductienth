@@ -2076,12 +2076,17 @@ if MENU_BUILD then
     tip("+" .. amount .. " " .. (NAMES[id] or id) .. ": " .. before .. " -> " .. eco.d[id])
   end
   function Menu.OpenPanel(name)
+    -- The chest exchange panel indexes ActivityModule:GetChestConfig(), which
+    -- is nil until the Chest module unlocks (MODULE_UNLOCK_STAGE.Chest).
     if tostring(name):find("activity/chest", 1, true) then
-      pcall(function()
-        print("[OFFLINE-MENU] chest open=" .. tostring(_ENV.ActivityModule:IsOpen()) ..
-          " sync=" .. ser(_ENV.QueryData:GetSyncActivity("CHEST")) ..
-          " cfg=" .. tostring(_ENV.ConfigMgr:GetActivityChestById("act1") ~= nil))
-      end)
+      local ok, open = pcall(function() return _ENV.ActivityModule:IsOpen() end)
+      if not (ok and open) then
+        local stage = "?"
+        pcall(function() stage = tostring(_ENV.GameDef.MODULE_UNLOCK_STAGE.Chest) end)
+        print("[OFFLINE-MENU] OpenPanel " .. tostring(name) .. " locked, unlock stage=" .. stage)
+        tip("Shop trao đổi chưa mở: cần qua màn " .. stage)
+        return
+      end
     end
     -- GameHelper.OpenPanel is a raw lua_CFunction that reads a table at the
     -- top of the stack, so the call needs a (possibly empty) args table.
