@@ -2259,17 +2259,23 @@ RESPONSES = {
     local wish = kind.wish and math.floor(tonumber(box.we) or 0) or 0
     local wishName = wish > 0 and equipNameById(wish) or nil
     local entries = {}
+    -- box_module.GetProtectCount shows BOX.pc[id] as the draws left before
+    -- the guarantee, defaulting to protectCount, so it counts down.
     for _ = 1, count do
       local spec, fired = kind.base, nil
       for _, pr in ipairs(protects) do
-        box.pc[pr.id] = (tonumber(box.pc[pr.id]) or 0) + 1
-        if not fired and box.pc[pr.id] >= pr.n and kind.protect and kind.protect[pr.id] then
+        local left = math.floor(tonumber(box.pc[pr.id]) or pr.n)
+        if left < 1 or left > pr.n then left = pr.n end
+        box.pc[pr.id] = left - 1
+        if not fired and left <= 1 and kind.protect and kind.protect[pr.id] then
           fired, spec = pr.id, kind.protect[pr.id]
         end
       end
       local dist = rollDist(spec)
       for _, pr in ipairs(protects) do
-        if pr.id == fired or dist >= (PROTECT_FLOOR[pr.id] or math.huge) then box.pc[pr.id] = 0 end
+        if pr.id == fired or box.pc[pr.id] < 1 or dist >= (PROTECT_FLOOR[pr.id] or math.huge) then
+          box.pc[pr.id] = pr.n
+        end
       end
       local e = boxPiece("pool_all_equipment")
       if e and wishName and dist >= 2600 and (fired or math.random() < 0.5) then e.args = wishName end
@@ -2282,15 +2288,16 @@ RESPONSES = {
     for _, r in ipairs(granted) do
       for _, u in ipairs(tbl(r.uids)) do OFFLINE_LAST_BOX[#OFFLINE_LAST_BOX + 1] = { uid = u, args = r.args } end
     end
-    -- BoxItemsPanel draws the gift_equip icon from args, then
-    -- EquipModule:IsDecomposition parses params as a packed equipment value
-    -- (template id << 16 | distribution) to get the quality.
+    -- BoxItemsPanel draws the gift_equip icon from args and its quality
+    -- frame from EquipModule:ParseEquipParamValue(params), which reads a
+    -- number (template id << 16 | distribution) and gives quality 0 for
+    -- anything else.
     local reward = {}
     for _, r in ipairs(granted) do
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
         for _ = 1, #r.uids do
           reward[#reward + 1] = { id = "gift_equip", count = 1, args = r.args,
-            params = tostring((r.tid << 16) | (r.dist or 1)) }
+            params = (r.tid << 16) | (r.dist or 1) }
         end
       else
         reward[#reward + 1] = r
