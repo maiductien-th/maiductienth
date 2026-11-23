@@ -16,11 +16,17 @@ if [ -n "${BUILD_TOOLS:-}" ]; then ZIPALIGN="$BUILD_TOOLS/zipalign"; APKSIGNER="
 [ -n "${KS_PASS:-}" ] || { echo "set KS_PASS to the password of $KS" >&2; exit 1; }
 python3 -c "import UnityPy" 2>/dev/null || { echo "UnityPy missing; run tools/setup.sh" >&2; exit 1; }
 TMP=$(mktemp -d)
-if [ "${MENU:-0}" = 1 ]; then
+# DEV=1 additionally enables the files-dir eval hook used for emulator tests.
+if [ "${MENU:-0}" = 1 ] || [ "${DEV:-0}" = 1 ]; then
   mkdir "$TMP/lua"
   cp "$LUA_DIR"/*.lua "$TMP/lua/"
-  grep -q '^local MENU_BUILD = false$' "$TMP/lua/net_agent.lua" || { echo "MENU_BUILD flag not found" >&2; exit 1; }
-  sed -i 's/^local MENU_BUILD = false$/local MENU_BUILD = true/' "$TMP/lua/net_agent.lua"
+  if [ "${MENU:-0}" = 1 ]; then
+    grep -q '^local MENU_BUILD = false$' "$TMP/lua/net_agent.lua" || { echo "MENU_BUILD flag not found" >&2; exit 1; }
+    sed -i 's/^local MENU_BUILD = false$/local MENU_BUILD = true/' "$TMP/lua/net_agent.lua"
+  fi
+  if [ "${DEV:-0}" = 1 ]; then
+    sed -i 's/^local DEV_EVAL = false$/local DEV_EVAL = true/' "$TMP/lua/net_agent.lua"
+  fi
   LUA_DIR="$TMP/lua"
 fi
 

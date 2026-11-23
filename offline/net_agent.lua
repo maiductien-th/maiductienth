@@ -1,6 +1,7 @@
 -- Offline replacement for net/net_agent.lua: answers client requests from
 -- local state saved under the app's files dir; nothing goes over the network.
 local NetAgent = {}
+local function tbl(v) return type(v) == "table" and v or {} end
 _ENV.NetAgent = NetAgent
 -- the stock net_agent loads ProtoGenerator via net.sproto_helper -> proto; battle_module needs the global
 local okPG, errPG = pcall(require, "proto_generator")
@@ -11,6 +12,24 @@ NetAgent.logining = false
 NetAgent.proto_handle_list = {}
 NetAgent.send_callback_list = {}
 NetAgent.pending = {}
+
+-- DEV=1 test builds only: run Lua dropped (as root) into the files dir.
+local DEV_EVAL = false
+local DEV_EVAL_PATH = "/data/data/com.fattoy.swordash.android/files/offline_eval.lua"
+local devTick = 0
+local function devEval()
+  devTick = devTick + 1
+  if devTick % 30 ~= 0 then return end
+  local f = io.open(DEV_EVAL_PATH, "r")
+  if not f then return end
+  local code = f:read("a")
+  f:close()
+  os.remove(DEV_EVAL_PATH)
+  local fn, err = load(code, "offline_eval", "t", _ENV)
+  local ok, res = false, err
+  if fn then ok, res = pcall(fn) end
+  print("[OFFLINE] EVAL ok=" .. tostring(ok) .. " " .. tostring(res))
+end
 
 function NetAgent:Init(...)
   local self_ref = self
@@ -34,6 +53,7 @@ function NetAgent:GetNetworkDelayDisplay() return "0" end
 function NetAgent:RequestServerRoute(...) end
 function NetAgent:Connect(...) end
 function NetAgent:Update(...)
+  if DEV_EVAL then devEval() end
   local n = #self.pending
   if n == 0 then return end
   local queued = self.pending
@@ -546,9 +566,28 @@ local function expandRandom(entries, all, depth)
         if sub.id == "__pool" then
           for _, x in ipairs(expandRandom({ { id = "__p", count = 1, __pool = sub.pool } }, all, depth + 1)) do out[#out + 1] = x end
         else
-          out[#out + 1] = sub
+          for _, x in ipairs(expandRandom({ sub }, all, depth + 1)) do out[#out + 1] = x end
         end
       end
+    elseif type(cfg) == "table" and type(cfg.params) == "table"
+        and (cfg.type == "RandomEconomic" or cfg.type == "ServerRandom") then
+      -- RandomEconomic {id, min, max}; ServerRandom {item, args = {min, max}}
+      local p = cfg.params
+      local rid = p.id or p.item
+      local lo = math.floor(tonumber(p.min) or tonumber(tbl(p.args)[1]) or 1)
+      local hi = math.max(lo, math.floor(tonumber(p.max) or tonumber(tbl(p.args)[2]) or lo))
+      local n = 0
+      for _ = 1, math.floor(e.count or 1) do n = n + (all and lo or math.random(lo, hi)) end
+      out[#out + 1] = { id = tostring(rid), count = n }
+    elseif type(cfg) == "table" and cfg.type == "SpecEquipment" and e.args then
+      -- fixed piece (args = equipment name) at params.distribution quality
+      out[#out + 1] = { id = "gift_equip", count = math.floor(e.count or 1), args = e.args,
+        dist = type(cfg.params) == "table" and tonumber(cfg.params.distribution) or nil }
+    elseif type(cfg) == "table" and cfg.type == "ReplaceItem" and type(cfg.params) == "table"
+        and type(cfg.params.raw) == "table" then
+      -- the replacement only applies once the condition (e.g. noAD) is owned
+      local raw = cfg.params.raw
+      out[#out + 1] = { id = tostring(raw.id), count = math.floor((tonumber(raw.count) or 1) * (e.count or 1)) }
     else
       out[#out + 1] = e
     end
@@ -567,7 +606,7 @@ local function rewardsGrantable(entries)
     if e.id == "gift_equip" then
       if not equipTemplateId(e.args) then return false, e.args end
     elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
-        and kind ~= "PetCapacity" and kind ~= "MonthCard"
+        and kind ~= "PetCapacity" and kind ~= "MonthCard" and kind ~= "MonthCardTrial" and kind ~= "Skin"
         and not realIdOf(e.id) then
       return false, e.id
     end
@@ -633,7 +672,7 @@ local function grantRewards(entries, sync)
       sync.PET = sync.PET or moduleState("PET")
       sync.PET.ac = (tonumber(sync.PET.ac) or 0) + n
       shown[#shown + 1] = { id = id, count = n }
-    elseif type(cfg) == "table" and cfg.type == "MonthCard" then
+    elseif type(cfg) == "table" and (cfg.type == "MonthCard" or cfg.type == "MonthCardTrial") then
       -- vip_module_month_card: VIP.mc[card].ft is the last active date
       -- (GetDateNumber form); ccd > 0 lets today's daily gift be claimed.
       local cid = type(cfg.params) == "table" and tostring(cfg.params.id) or id
@@ -648,10 +687,26 @@ local function grantRewards(entries, sync)
       if active then
         base = os.time({ year = ft // 10000, month = ft // 100 % 100, day = ft % 100, hour = 12 })
       end
-      c.ft = tonumber(os.date("%Y%m%d", base + 30 * 86400 * n - (active and 0 or 86400)))
+      local days = math.floor(tonumber(type(cfg.params) == "table" and cfg.params.trial_days) or 30)
+      c.ft = tonumber(os.date("%Y%m%d", base + days * 86400 * n - (active and 0 or 86400)))
       c.ccd = 1
       sync.VIP.mc[cid] = c
       shown[#shown + 1] = { id = id, count = n }
+    elseif type(cfg) == "table" and cfg.type == "Skin" then
+      -- PLAYER.sl is the owned-skin bitset by skin config index
+      local idx
+      pcall(function() idx = tonumber(_ENV.ConfigMgr:GetSkinConfig(tostring(cfg.params or id)).index) end)
+      if idx and idx >= 1 then
+        sync.PLAYER = sync.PLAYER or moduleState("PLAYER")
+        local sl = tbl(sync.PLAYER.sl)
+        local w = (idx - 1) // 32 + 1
+        for k = 1, w do sl[k] = sl[k] or 0 end
+        sl[w] = sl[w] | (1 << ((idx - 1) % 32))
+        sync.PLAYER.sl = sl
+        shown[#shown + 1] = { id = id, count = 1 }
+      else
+        print("[OFFLINE] reward UNRESOLVED skin " .. tostring(id))
+      end
     elseif type(cfg) == "table" and cfg.type == "Economic" then
       sync.ECO = sync.ECO or moduleState("ECO")
       local eco = sync.ECO
@@ -1693,13 +1748,23 @@ RESPONSES = {
     local cfg = _ENV.ConfigMgr:GetSKUConfig(sku)
     if type(cfg) ~= "table" then return failRes("PURCHASE.ECO_PURCHASE unknown sku " .. sku) end
     -- Offline there is no billing, so "money" packs are granted on tap too.
-    if not data.__offline_paid and cfg.model ~= "video" and cfg.model ~= "free" and cfg.model ~= "money" then
+    -- Supply packs priced in an in-game currency (model gem/rmb/tb, price
+    -- = amount) are paid from that currency.
+    local items = _ENV.ConfigMgr:GetConfig("item") or {}
+    local curCfg = items[tostring(cfg.model)]
+    local currencyCost = type(curCfg) == "table" and curCfg.type == "Economic"
+      and math.floor(tonumber(cfg.price) or 0) or 0
+    if not data.__offline_paid and currencyCost <= 0 and cfg.model ~= "video"
+        and cfg.model ~= "free" and cfg.model ~= "money" then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " model " .. tostring(cfg.model) .. " needs real billing")
     end
     local entries = rewardEntries(seq(cfg.itemList))
     local grantable, missing = rewardsGrantable(entries)
     if not grantable then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " reward not supported offline: " .. tostring(missing))
+    end
+    if currencyCost > 0 and owned({}, tostring(cfg.model)) < currencyCost then
+      return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " short of " .. tostring(cfg.model))
     end
     local pur = moduleState("Purchase")
     local cl = cfg.conditionLimit
@@ -1719,9 +1784,13 @@ RESPONSES = {
       setBits(rec.c, index, 4, used + 1)
       pur.lpc[period] = rec
     end
+    local sync = { Purchase = pur }
+    if currencyCost > 0 then
+      local paid, short = spend(sync, { [tostring(cfg.model)] = currencyCost })
+      if not paid then return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " short of " .. tostring(short)) end
+    end
     pur.pcr = tbl(pur.pcr)
     pur.pcr[sku] = (tonumber(pur.pcr[sku]) or 0) + 1
-    local sync = { Purchase = pur }
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] PURCHASE.ECO_PURCHASE " .. sku .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
@@ -1746,7 +1815,7 @@ RESPONSES = {
     local cfg = _ENV.ConfigMgr:GetBoxConfig(boxId)
     if type(cfg) ~= "table" then return failRes("SHOP.OPEN_BOX unknown box " .. boxId) end
     local paidCount = math.max(1, math.floor(tonumber(data.count) or 1))
-    local count = math.max(1, math.floor(tonumber(data.count) or tonumber(cfg.loopCount) or 1))
+    local count = paidCount * math.max(1, math.floor(tonumber(cfg.loopCount) or 1))
     local now = os.time()
     local box = moduleState("BOX")
     box.cd, box.ot = tbl(box.cd), tbl(box.ot)
@@ -2005,6 +2074,27 @@ RESPONSES = {
     bumpRecord(sync, 6, 1)
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] ADV.CLAIM_SWEEP_REWARD " .. stage .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+
+  -- player_module: PLAYER.nst holds a 2-bit state per day (1 claimable,
+  -- 2 claimed); rewards come from the newbie_signIn config row for the day.
+  ["PLAYER.NEWBIE_SIGN"] = function(data)
+    local day = math.floor(tonumber(tbl(data).day) or 0)
+    local pl = moduleState("PLAYER")
+    pl.nst = tbl(pl.nst)
+    if day < 1 or day > 7 or getBits(pl.nst, day - 1, 2) ~= 1 then
+      return failRes("PLAYER.NEWBIE_SIGN day " .. day .. " not claimable")
+    end
+    local row
+    for _, r in pairs(_ENV.ConfigMgr:GetConfig("newbie_signIn") or {}) do
+      if type(r) == "table" and tonumber(r.day) == day then row = r end
+    end
+    local entries = rewardEntries(row and row.reward)
+    if #entries == 0 or not rewardsGrantable(entries) then return failRes("PLAYER.NEWBIE_SIGN day " .. day .. " reward unresolved") end
+    local sync = { PLAYER = pl }
+    setBits(pl.nst, day - 1, 2, 2)
+    local reward = grantRewards(entries, sync)
     return okRes({ reward = reward }), sync
   end,
 
@@ -2551,5 +2641,8 @@ function NetAgent:Login(...)
     gid             = "1",
     reg             = false,
   }
+end
+if DEV_EVAL then
+  _ENV.OfflineDev = { ser = ser, RESPONSES = RESPONSES, moduleState = moduleState }
 end
 return NetAgent
