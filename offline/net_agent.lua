@@ -2325,17 +2325,17 @@ RESPONSES = {
     for _, r in ipairs(granted) do
       for _, u in ipairs(tbl(r.uids)) do OFFLINE_LAST_BOX[#OFFLINE_LAST_BOX + 1] = { uid = u, args = r.args } end
     end
-    -- BoxItemsPanel shows each piece through ItemMgr's executor for the item
-    -- id. gift_equip (SpecEquipmentItem) only knows the template name, so
-    -- every frame is common, and drop_equip never resolves its icon here.
-    -- myequip (OwnedEquipmentItem) takes the owned uid and reads template and
-    -- quality from the granted piece, and EquipModule.IsDecomposition handles
-    -- it natively for the decompose marker.
+    -- BoxPanel expects myequip rows (OwnedEquipmentItem): the icon, quality
+    -- and description are read from the granted piece by uid, and
+    -- EquipModule.IsDecomposition handles them natively. ParseLuaStateRewardList
+    -- copies `args`, not `params`, into the item param, so the uid goes in
+    -- `args`. gift_equip resolves quality from the template name only, so
+    -- every frame came out common.
     local reward = {}
     for _, r in ipairs(granted) do
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
         for _, u in ipairs(r.uids) do
-          reward[#reward + 1] = { id = "myequip", count = 1, quantity = 1, params = tostring(u) }
+          reward[#reward + 1] = { id = "myequip", count = 1, quantity = 1, args = tostring(u), params = tostring(u) }
         end
       else
         reward[#reward + 1] = r
