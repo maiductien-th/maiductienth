@@ -1008,7 +1008,19 @@ local POOL_SHOPS = { "coin", "gem", "rmb", "tb" }
 -- The Daily Deal exchange (dynamic shop "2") is priced in dsop, the points
 -- the daily deal packs give. Its catalogue only comes from the server, so
 -- offline it sells this fixed list: {reward, price, daily limit}.
+-- Dynamic shop "1" is the Rewinding Treasure exchange (DynamicShopPanel with
+-- WishPointsStoreItem rows), priced in wp, the wish points.
 local DYNAMIC_FALLBACK = {
+  ["1"] = {
+    { "key_rare|1", "wp|300", 5 },
+    { "cell_l|1", "wp|500", 2 },
+    { "cell_m|1", "wp|200", 5 },
+    { "key_adv|3", "wp|100", 5 },
+    { "gem|100", "wp|50", 5 },
+    { "capsule|10", "wp|60", 5 },
+    { "stone|200", "wp|40", 5 },
+    { "coin|100000", "wp|30", 5 },
+  },
   ["2"] = {
     { "key_rare|1", "dsop|30", 5 },
     { "key_common|3", "dsop|10", 5 },
