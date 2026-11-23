@@ -836,10 +836,22 @@ dynamicShopRows = function(shopType)
   end
   return rows
 end
+-- shop limitType 1 counts reset daily, 2 weekly; nothing announces the
+-- reset offline, so each dph[type] remembers the day/week it counts for.
+local function rollDynamic(d)
+  local day, week = tonumber(os.date("%Y%m%d")), tonumber(os.date("%Y%W"))
+  if d.dd ~= day then d[1] = nil; d.dd = day end
+  if d.wk ~= week then d[2] = nil; d.wk = week end
+  return d
+end
 local function ensureShops(shop)
   shop.tsl = tbl(shop.tsl)
   for _, s in ipairs(POOL_SHOPS) do
     if type(shop.tsl[s]) ~= "table" then shop.tsl[s] = rollShop(s) end
+  end
+  shop.dph = tbl(shop.dph)
+  for _, d in pairs(shop.dph) do
+    if type(d) == "table" then rollDynamic(d) end
   end
   return shop
 end
@@ -1418,7 +1430,7 @@ RESPONSES = {
     end
     local shop = moduleState("SHOP")
     shop.dph = tbl(shop.dph)
-    local d = tbl(shop.dph[t])
+    local d = rollDynamic(tbl(shop.dph[t]))
     local bucket
     if row.limitType then
       d[row.limitType] = tbl(d[row.limitType]); d[row.limitType].c = tbl(d[row.limitType].c)
@@ -1450,7 +1462,13 @@ RESPONSES = {
     print("[OFFLINE] SHOP.PURCHASE_DYNAMIC " .. t .. " " .. id .. " x" .. count .. " cost=" .. ser(costs))
     return okRes({ reward = reward }), sync
   end,
-  ["SHOP.RESET_DYNAMIC"] = function() return okRes() end,
+  ["SHOP.RESET_DYNAMIC"] = function(data)
+    local t = tostring(tbl(data).type or "")
+    local shop = moduleState("SHOP")
+    shop.dph = tbl(shop.dph)
+    shop.dph[t] = rollDynamic(tbl(shop.dph[t]))
+    return okRes(), { SHOP = shop }
+  end,
   -- lottery_module.StatrWheel sends {type, count, is_free}; per-type state
   -- is LOTTERY.pw[PRIZE_WHEEL_CONFIG[type].data_type] = {c = draws,
   -- tc = free draws, l = lucky value, r = claimed cumulative-reward bits}.
