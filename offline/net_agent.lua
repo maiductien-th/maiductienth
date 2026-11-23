@@ -839,7 +839,11 @@ end
 -- shop limitType 1 counts reset daily, 2 weekly; nothing announces the
 -- reset offline, so each dph[type] remembers the day/week it counts for.
 local function rollDynamic(d)
-  local day, week = tonumber(os.date("%Y%m%d")), tonumber(os.date("%Y%W"))
+  local now = os.time()
+  local wday = os.date("*t", now).wday -- 1 = Sunday
+  -- the week is keyed by its Monday so it does not split at New Year
+  local day = tonumber(os.date("%Y%m%d", now))
+  local week = tonumber(os.date("%Y%m%d", now - ((wday + 5) % 7) * 86400))
   if d.dd ~= day then d[1] = nil; d.dd = day end
   if d.wk ~= week then d[2] = nil; d.wk = week end
   return d
