@@ -3010,6 +3010,18 @@ local function patchEquipDecompose()
       return { id = tostring(v >> 16), quality = gd:GetEquipQuality(v & 0xFFFF) }
     end
   end
+  -- GetSpecAttrBuffList builds its eval env with equip_stars = 0, and
+  -- GetPropertyValueList(0) is nil (stars start at 1), so special-attribute
+  -- formulas that read PV throw in the item description panel.
+  local cm = _ENV.ConfigMgr
+  if type(cm) == "table" and type(cm.GetPropertyValueList) == "function" then
+    local pvl = cm.GetPropertyValueList
+    cm.GetPropertyValueList = function(self, stars, ...)
+      local r = pvl(self, stars, ...)
+      if r == nil and (tonumber(stars) or 0) < 1 then r = pvl(self, 1, ...) end
+      return r
+    end
+  end
   em.__offline_dec = true
 end
 
