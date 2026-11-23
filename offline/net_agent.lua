@@ -198,6 +198,25 @@ local function loadSaved()
   print("[OFFLINE] saved profile invalid")
   return nil
 end
+-- FRONTLINE.fd is server-filled: bits 8-10 hold today's wday and bits
+-- 11-12 the round (index into FRONTLINE_REFRESH_WDAY {2, 4, 6, 1}).
+-- GetWdayIndex returns -1 for wday 0 and FrontLinePanel then indexes out of
+-- range. Rounds roll over at 04:00 (FrontLineModule.GetResetTime) and the
+-- week starts Monday 04:00, when the per-round scores in ds are cleared.
+local function frontlineRoll(fl)
+  local t = os.time() - 4 * 3600
+  local wday = os.date("*t", t).wday
+  local round = wday == 1 and 3 or (wday - 2) // 2
+  local fd = tonumber(fl.fd) or 0
+  fl.fd = (fd & ~(0x1F << 8)) | (wday << 8) | (round << 11)
+  local week = os.date("%Y-%W", t)
+  if fl._week ~= week then
+    fl._week = week
+    fl.ds = {}
+  end
+  return round + 1
+end
+
 local function initState()
   local st = {}
   for _, m in ipairs(_ENV.ModuleDef.SYNC) do st[m.name] = deepcopy(m.data or {}) end
@@ -233,17 +252,7 @@ local function initState()
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
-  -- FRONTLINE.fd is server-filled: bits 8-10 hold today's wday and bits
-  -- 11-12 the round (index into FRONTLINE_REFRESH_WDAY {2, 4, 6, 1}).
-  -- GetWdayIndex returns -1 for wday 0 and FrontLinePanel then indexes
-  -- out of range.
-  if type(st.FRONTLINE) == "table" then
-    -- Frontline rounds roll over at 04:00 (FrontLineModule.GetResetTime).
-    local wday = os.date("*t", os.time() - 4 * 3600).wday
-    local round = wday == 1 and 3 or (wday - 2) // 2
-    local fd = tonumber(st.FRONTLINE.fd) or 0
-    st.FRONTLINE.fd = (fd & ~(0x1F << 8)) | (wday << 8) | (round << 11)
-  end
+  if type(st.FRONTLINE) == "table" then frontlineRoll(st.FRONTLINE) end
   -- Real-money packs are bought with the "money" (voucher) resource when
   -- CanBuyProductByMoney allows it; offline that balance never runs out
   -- and ECO_PURCHASE does not charge it.
@@ -1493,13 +1502,17 @@ RESPONSES = {
   -- that load on the loading screen. Opening the next bank: index i + 1,
   -- start time st, empty savings cs/ts.
   -- FrontLinePanel.RequestReset runs on every open; nothing to reset offline.
-  ["FRONTLINE.RESET"] = function() return okRes(), { FRONTLINE = moduleState("FRONTLINE") } end,
+  ["FRONTLINE.RESET"] = function()
+    local fl = moduleState("FRONTLINE")
+    frontlineRoll(fl)
+    return okRes(), { FRONTLINE = fl }
+  end,
   -- The round score is kept per round in FRONTLINE.ds (best of the week).
   ["FRONTLINE.CALCULATE_SCORE"] = function(data)
     data = tbl(data)
     local fl = moduleState("FRONTLINE")
+    local round = frontlineRoll(fl)
     fl.ds = tbl(fl.ds)
-    local round = (((tonumber(fl.fd) or 0) >> 11) & 0x7) + 1
     local score = math.floor(tonumber(data.score) or 0)
     if score <= 0 then
       local wave = math.floor(tonumber(data.monster_wave) or 0)
