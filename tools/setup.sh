@@ -21,6 +21,8 @@ if ! command -v apksigner >/dev/null; then
 fi
 
 pip install -q --break-system-packages objection frida-tools 2>/dev/null || pip install -q objection frida-tools
+# offline APK builder (tools/build_offline_apk.sh)
+pip install -q --break-system-packages UnityPy==1.25.2 2>/dev/null || pip install -q UnityPy==1.25.2
 
 # APKEditor (merge split APK)
 mkdir -p tools/bin
