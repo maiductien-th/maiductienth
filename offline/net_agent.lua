@@ -2976,6 +2976,15 @@ local function unlockAllModules()
     for k in pairs(gd.MODULE_UNLOCK_STAGE) do gd.MODULE_UNLOCK_STAGE[k] = 0 end
   end
   if tonumber(gd.HEROIC_UNLOCK_STAGE) then gd.HEROIC_UNLOCK_STAGE = 0 end
+  -- World entries (FateEntry, FrontlineEntry) compare the stage record with
+  -- these indexes; the record is never below 0.
+  for _, k in ipairs({ "FATE_STAGE_INDEX", "FRONT_LINE_STAGE_INDEX" }) do
+    if tonumber(gd[k]) then gd[k] = -1 end
+  end
+  local am = _ENV.AdventureModule
+  if type(am) == "table" and type(am.CanEnterFate) == "function" then
+    am.CanEnterFate = function() return 1 end
+  end
   -- item UseCondition {id = "passStage", param = N} (pay_pet_D: Mission 5)
   local cm = _ENV.ConfigMgr
   for _, c in pairs(cm and cm:GetConfig("item") or {}) do
