@@ -203,7 +203,11 @@ end
 -- GetWdayIndex returns -1 for wday 0 and FrontLinePanel then indexes out of
 -- range. Rounds roll over at 04:00 (FrontLineModule.GetResetTime) and the
 -- week starts Monday 04:00, when the per-round scores in ds are cleared.
-local function frontlineRoll(fl)
+-- The week marker lives at the top of the saved state: an undeclared key
+-- inside FRONTLINE breaks its wire encoding.
+local function frontlineRoll(fl, st)
+  st = st or NetAgent.state or {}
+  fl._week = nil
   local t = os.time() - 4 * 3600
   local wday = os.date("*t", t).wday
   local round = wday == 1 and 3 or (wday - 2) // 2
@@ -213,10 +217,10 @@ local function frontlineRoll(fl)
   local monday = os.date("*t", t)
   monday.day, monday.hour = monday.day - (wday + 5) % 7, 12
   local week = os.date("%Y%m%d", os.time(monday))
-  if fl._week ~= week then
+  if st._flweek ~= week then
     -- Profiles saved before the marker existed keep their scores.
-    if fl._week ~= nil then fl.ds = {} end
-    fl._week = week
+    if st._flweek ~= nil then fl.ds = { 0, 0, 0, 0 } end
+    st._flweek = week
   end
   return round + 1
 end
@@ -256,7 +260,8 @@ local function initState()
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
-  if type(st.FRONTLINE) == "table" then frontlineRoll(st.FRONTLINE) end
+  st._flweek = saved and saved._flweek
+  if type(st.FRONTLINE) == "table" then frontlineRoll(st.FRONTLINE, st) end
   -- Real-money packs are bought with the "money" (voucher) resource when
   -- CanBuyProductByMoney allows it; offline that balance never runs out
   -- and ECO_PURCHASE does not charge it.
