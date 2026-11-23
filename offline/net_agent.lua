@@ -575,6 +575,18 @@ local function rewardsGrantable(entries)
   return true
 end
 
+-- achievement_module reads server-kept counters from ACHIEVEMENT.dr
+-- [recordKey]: 1 coin gained, 2 energy used, 4 boxes opened, 6 sweeps,
+-- 7 gems spent, 10 pieces decomposed, 12/13 epic/legend pieces gained.
+local function bumpRecord(sync, key, n)
+  if (n or 0) <= 0 then return end
+  local ach = sync.ACHIEVEMENT or moduleState("ACHIEVEMENT")
+  ach.dr = type(ach.dr) == "table" and ach.dr or {}
+  ach.dr[key] = (tonumber(ach.dr[key]) or 0) + n
+  sync.ACHIEVEMENT = ach
+end
+OFFLINE_LAST_BOX = {}
+
 local function grantRewards(entries, sync)
   entries = expandRandom(entries, false)
   local items = _ENV.ConfigMgr:GetConfig("item") or {}
@@ -592,14 +604,17 @@ local function grantRewards(entries, sync)
         for _ = 1, n do
           local euid = math.floor(tonumber(eq.euid) or 1)
           eq.el[tostring(euid)] = { [1] = (tid << 16) | (1 << 8) | 1 | EQUIP_NEW_MASK,
-            [2] = 1, [3] = {}, [5] = 0 }
+            [2] = math.max(1, math.floor(tonumber(e.dist) or 1)), [3] = {}, [5] = 0 }
           eq.euid = euid + 1
           uids[#uids + 1] = tostring(euid)
         end
         -- Shown as the gift_equip item (SpecEquipment) with the piece in args;
         -- equipment names have no ItemConfig row of their own. uids lists the
         -- created pieces for callers that report them one by one.
-        shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args), uids = uids, tid = tid }
+        local d = math.floor(tonumber(e.dist) or 1)
+        if d >= 3300 then bumpRecord(sync, 13, n) elseif d >= 2600 then bumpRecord(sync, 12, n) end
+        shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args), uids = uids, tid = tid,
+          dist = math.max(1, math.floor(tonumber(e.dist) or 1)) }
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
       end
@@ -737,6 +752,7 @@ local function spend(sync, costs)
     if n > 0 then
       local have, kind, rid = owned(sync, id)
       local eco = sync.ECO
+      if id == "gem" then bumpRecord(sync, 7, n) end
       if kind == "d" then
         eco.d[id] = have - n
       else
@@ -864,6 +880,46 @@ NetAgent.ensureShops = ensureShops
 -- No drop tables ship with the client (ConfigMgr "drop_group" is nil), so a
 -- main-stage win drops one piece from the equipment set of its chapter.
 local DROP_SETS = { 150, 200, 250, 300, 350, 400, 450 }
+-- Equipment distribution (quality score): Random:normalDistribution(mean,
+-- sd, min, max) - 8000, as game_def's drop-rate self-test does; quality is
+-- the highest GameDef.QUALITY threshold it reaches (epic 2600, legend 3300).
+local function rollDist(spec)
+  local u1, u2 = math.random(), math.random()
+  if u1 < 1e-9 then u1 = 1e-9 end
+  local z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+  local v = math.floor(spec[1] + z * spec[2])
+  if spec[3] and v < spec[3] then v = spec[3] end
+  if spec[4] and v > spec[4] then v = spec[4] end
+  return math.max(1, v - 8000)
+end
+
+-- Box rolls from the equip_box_* item rows: base roll, then protect
+-- (pity) rolls keyed by the box config's protectId, counted in BOX.pc.
+local BOX_ROLLS = {
+  common = { base = { 9600, 500, 8000, 10800 } },
+  adv = { base = { 10000, 500, 9400, 11800 },
+    protect = { box_adv = { 10900, 100, 10600, 11800 }, box_adv10 = { 10900, 100, 10600, 11800 } } },
+  rmb = { base = { 9800, 400, 9400, 11500 }, wish = true,
+    protect = { box_epic = { 10600, 400, 10600, 11700 }, box_legend = { 11300, 250, 11300, 12100 } } },
+}
+local PROTECT_FLOOR = { box_adv = 2600, box_adv10 = 2600, box_epic = 2600, box_legend = 3300 }
+
+local function equipNameById(tid)
+  for k, v in pairs(_ENV.ConfigMgr:GetConfig("equipment") or {}) do
+    if type(v) == "table" and math.floor(tonumber(v.id) or tonumber(k) or -1) == tid then return v.name end
+  end
+  return nil
+end
+
+local function boxPiece(pool)
+  for _ = 1, 8 do
+    local got = expandRandom({ { id = "__p", count = 1, __pool = pool } }, false)
+    local e = got[1]
+    if e and e.id == "gift_equip" and equipTemplateId(e.args) then return e end
+  end
+  return nil
+end
+
 local function stageDrop(cfg)
   local chapter = math.max(1, math.floor(tonumber(cfg and cfg.chapter) or 1))
   local base = DROP_SETS[math.min(chapter, #DROP_SETS)]
@@ -877,7 +933,7 @@ local function stageDrop(cfg)
   end
   table.sort(pool)
   if #pool == 0 then return nil end
-  return { id = "gift_equip", count = 1, args = pool[math.random(#pool)] }
+  return { id = "gift_equip", count = 1, args = pool[math.random(#pool)], dist = rollDist({ 9800, 500, 8000 }) }
 end
 
 -- Stage stars: one per met starConditions entry (victory, duration <= param
@@ -1707,13 +1763,42 @@ RESPONSES = {
     end
     if (tonumber(cfg.CD) or 0) > 0 then box.cd[boxId] = now + math.floor(tonumber(cfg.CD)) end
     box.ot[boxId] = (tonumber(box.ot[boxId]) or 0) + 1
-    local adv = moduleState("ADV")
+    local kind = BOX_ROLLS[boxId:match("^box_(%a+)") or ""] or BOX_ROLLS.common
+    box.pc = tbl(box.pc)
+    local protects = {}
+    local ids, counts = seq(cfg.protectId), seq(cfg.protectCount)
+    if type(cfg.protectId) == "string" then ids = {} for x in cfg.protectId:gmatch("[^|]+") do ids[#ids + 1] = x end end
+    for i, pid in ipairs(ids) do
+      local n = math.floor(tonumber(counts[i]) or 0)
+      if n > 0 then protects[#protects + 1] = { id = tostring(pid), n = n } end
+    end
+    table.sort(protects, function(a, b) return a.n > b.n end)
+    local wish = kind.wish and math.floor(tonumber(box.we) or 0) or 0
+    local wishName = wish > 0 and equipNameById(wish) or nil
     local entries = {}
     for _ = 1, count do
-      local e = stageDrop({ chapter = math.max(1, math.ceil(((tonumber(adv.stage) or 1) - 1) / 5)) })
-      if e then entries[#entries + 1] = e end
+      local spec, fired = kind.base, nil
+      for _, pr in ipairs(protects) do
+        box.pc[pr.id] = (tonumber(box.pc[pr.id]) or 0) + 1
+        if not fired and box.pc[pr.id] >= pr.n and kind.protect and kind.protect[pr.id] then
+          fired, spec = pr.id, kind.protect[pr.id]
+        end
+      end
+      local dist = rollDist(spec)
+      for _, pr in ipairs(protects) do
+        if pr.id == fired or dist >= (PROTECT_FLOOR[pr.id] or math.huge) then box.pc[pr.id] = 0 end
+      end
+      local e = boxPiece("pool_all_equipment")
+      if e and wishName and dist >= 2600 and (fired or math.random() < 0.5) then e.args = wishName end
+      if e then e.dist = dist entries[#entries + 1] = e end
     end
+    if #entries < count then return failRes("SHOP.OPEN_BOX " .. boxId .. " no equipment pool") end
     local granted = grantRewards(entries, sync)
+    bumpRecord(sync, 4, count)
+    OFFLINE_LAST_BOX = {}
+    for _, r in ipairs(granted) do
+      for _, u in ipairs(tbl(r.uids)) do OFFLINE_LAST_BOX[#OFFLINE_LAST_BOX + 1] = { uid = u, args = r.args } end
+    end
     -- BoxItemsPanel draws the gift_equip icon from args, then
     -- EquipModule:IsDecomposition parses params as a packed equipment value
     -- (template id << 16 | distribution) to get the quality.
@@ -1722,7 +1807,7 @@ RESPONSES = {
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
         for _ = 1, #r.uids do
           reward[#reward + 1] = { id = "gift_equip", count = 1, args = r.args,
-            params = tostring((r.tid << 16) | 1) }
+            params = tostring((r.tid << 16) | (r.dist or 1)) }
         end
       else
         reward[#reward + 1] = r
@@ -1807,6 +1892,122 @@ RESPONSES = {
   -- equip_module.RequestDecompose (lua:1672-1684) sends {list = {euid, ...}}
   -- and shows res.reward via ON_GET_ITEMS. The yield is the client's own
   -- GetAllDecomposeResult (coin, enhance material, ascend material refunds).
+  -- achievement_module: claimed count is a 4-bit field per claimIndex in
+  -- ACHIEVEMENT.cr; progress is a module function named after the id
+  -- (BAG_ROOM, STAR_X, ...) or the ACHIEVEMENT.dr counter at recordKey.
+  ["ACHIEVEMENT.CLAIM_REWARD"] = function(data)
+    local id = tostring(tbl(data).id or "")
+    local all = _ENV.ConfigMgr:GetAllAchievement() or {}
+    local cfg = all[id]
+    if type(cfg) ~= "table" then
+      for _, c in pairs(all) do if type(c) == "table" and c.id == id then cfg = c end end
+    end
+    if type(cfg) ~= "table" then return failRes("ACHIEVEMENT.CLAIM_REWARD unknown " .. id) end
+    local am = _ENV.AchievementModule
+    if am:CanClaimReward(id, cfg) ~= 1 then return failRes("ACHIEVEMENT.CLAIM_REWARD " .. id .. " not reached") end
+    local ci = math.floor(tonumber(cfg.claimIndex) or 0)
+    local ach = moduleState("ACHIEVEMENT")
+    ach.cr = tbl(ach.cr)
+    local claimed = getBits(ach.cr, ci - 1, 4)
+    local entries = rewardEntries(cfg["reward" .. (claimed + 1)])
+    if #entries == 0 then return failRes("ACHIEVEMENT.CLAIM_REWARD " .. id .. " no reward") end
+    local sync = { ACHIEVEMENT = ach }
+    setBits(ach.cr, ci - 1, 4, claimed + 1)
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ACHIEVEMENT.CLAIM_REWARD " .. id .. " #" .. (claimed + 1) .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+
+  ["SHOP.BOX_WISH"] = function(data)
+    local box = moduleState("BOX")
+    box.we = math.floor(tonumber(tbl(data).equip) or 0)
+    print("[OFFLINE] SHOP.BOX_WISH " .. box.we)
+    return okRes({}), { BOX = box }
+  end,
+
+  -- The box result panel's decompose helper sends the pieces it just
+  -- showed; match them to the pieces the last open created.
+  ["SHOP.AUTO_DECOMPOSE"] = function(data)
+    local eq = moduleState("EQUIP")
+    eq.el = tbl(eq.el)
+    local last, used, list = tbl(OFFLINE_LAST_BOX), {}, {}
+    for _, it in ipairs(tbl(tbl(data).equip_list)) do
+      local uid
+      for _, v in ipairs({ it.args, it.id, it.params }) do
+        local n = tonumber(v)
+        if n and eq.el[tostring(math.floor(n))] and not used[tostring(math.floor(n))] then uid = tostring(math.floor(n)) break end
+      end
+      if not uid then
+        for _, x in ipairs(last) do
+          if not used[x.uid] and eq.el[x.uid] and (x.args == tostring(it.args) or it.args == nil) then uid = x.uid break end
+        end
+      end
+      if uid then used[uid] = true list[#list + 1] = uid end
+    end
+    print("[OFFLINE] SHOP.AUTO_DECOMPOSE req=" .. ser(data) .. " uids=" .. ser(list))
+    if #list == 0 then return okRes({ reward = {} }) end
+    return RESPONSES["EQUIP.DECOMPOSE"]({ list = list })
+  end,
+
+  -- adventure_module: ADV.swl[stage_id] = sweep end time; the claim pays
+  -- the client's own GetSweepRewardList for the stage.
+  ["ADV.START_SWEEP"] = function(data)
+    local stage = tostring(tbl(data).stage_id or "")
+    local cfg = _ENV.ConfigMgr:GetStageConfig(stage)
+    if type(cfg) ~= "table" then return failRes("ADV.START_SWEEP unknown " .. stage) end
+    if _ENV.AdventureModule:CanSweep(stage) ~= 1 then return failRes("ADV.START_SWEEP " .. stage .. " not allowed") end
+    local adv = moduleState("ADV")
+    adv.swl = tbl(adv.swl)
+    if adv.swl[stage] then return failRes("ADV.START_SWEEP " .. stage .. " already sweeping") end
+    local sync = { ADV = adv }
+    for _, c in ipairs(rewardEntries(seq(cfg.cost))) do
+      if c.id == "energy" then
+        local en = moduleState("ENERGY")
+        regenEnergy(en)
+        local e = tonumber(en.e) or 0
+        if e < c.count then return failRes("ADV.START_SWEEP " .. stage .. " needs energy " .. c.count) end
+        en.e = e - c.count
+        if en.e < energyParams() and (tonumber(en.tst) or 0) <= 0 then en.tst = os.time() end
+        sync.ENERGY = en
+        bumpRecord(sync, 2, c.count)
+      end
+    end
+    local now = os.time()
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    adv.swl[stage] = now + math.max(1, math.floor(tonumber(cfg.sweepTime) or 10800))
+    print("[OFFLINE] ADV.START_SWEEP " .. stage .. " end=" .. adv.swl[stage])
+    return okRes({}), sync
+  end,
+
+  ["ADV.COMPLETE_SWEEP"] = function(data)
+    local stage = tostring(tbl(data).stage_id or "")
+    local adv = moduleState("ADV")
+    adv.swl = tbl(adv.swl)
+    if not adv.swl[stage] then return failRes("ADV.COMPLETE_SWEEP " .. stage .. " not sweeping") end
+    local now = os.time()
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    adv.swl[stage] = math.min(adv.swl[stage], now)
+    return okRes({}), { ADV = adv }
+  end,
+
+  ["ADV.CLAIM_SWEEP_REWARD"] = function(data)
+    local stage = tostring(tbl(data).stage_id or "")
+    local adv = moduleState("ADV")
+    adv.swl = tbl(adv.swl)
+    if _ENV.AdventureModule:IsSweepComplete(stage) ~= 1 then return failRes("ADV.CLAIM_SWEEP_REWARD " .. stage .. " not complete") end
+    local entries = {}
+    for _, r in ipairs(tbl(_ENV.AdventureModule:GetSweepRewardList(stage))) do
+      local n = math.floor(tonumber(r.count) or 0)
+      if r.id ~= nil and n > 0 then entries[#entries + 1] = { id = r.id, count = n, args = r.args } end
+    end
+    local sync = { ADV = adv }
+    adv.swl[stage] = nil
+    bumpRecord(sync, 6, 1)
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ADV.CLAIM_SWEEP_REWARD " .. stage .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+
   ["EQUIP.DECOMPOSE"] = function(data)
     data = tbl(data)
     local eq = moduleState("EQUIP")
@@ -1841,6 +2042,7 @@ RESPONSES = {
     local grantable, bad = rewardsGrantable(entries)
     if not grantable then return failRes("EQUIP.DECOMPOSE reward unresolved " .. tostring(bad)) end
     for _, uid in ipairs(list) do eq.el[tostring(math.floor(tonumber(uid)))] = nil end
+    bumpRecord(sync, 10, #list)
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] EQUIP.DECOMPOSE " .. ser(list) .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
@@ -2124,7 +2326,8 @@ if MENU_BUILD then
   -- reach the C# battle, which keeps its own copy.
   NAMES = {
     coin = "Vàng", rmb = "Zeno", stone = "Quặng lục lam", gem = "Đá quý",
-    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP", hb = "Xu kho báu Arch", ackp = "Điểm đổi rương sự kiện",
+    core_weapon = "Lõi vũ khí", core_armor = "Lõi giáp", core_helmet = "Lõi mũ",
+    core_shoes = "Lõi giày", core_ornament = "Lõi trang trí", core_disc = "Lõi đĩa ULT", capsule = "Viên nang XP", hb = "Xu kho báu Arch", ackp = "Điểm đổi rương sự kiện",
   }
   local PRESET = {
     { "+99999999 Vàng", "OfflineMenu.AddResource('coin', 99999999)" },
@@ -2132,15 +2335,16 @@ if MENU_BUILD then
     { "+99999999 Quặng lục lam", "OfflineMenu.AddResource('stone', 99999999)" },
     { "+99999999 Đá quý", "OfflineMenu.AddResource('gem', 99999999)" },
     { "+99999999 Lõi vũ khí", "OfflineMenu.AddResource('core_weapon', 99999999)" },
+    { "+99999999 Lõi giáp", "OfflineMenu.AddResource('core_armor', 99999999)" },
+    { "+99999999 Lõi mũ", "OfflineMenu.AddResource('core_helmet', 99999999)" },
+    { "+99999999 Lõi giày", "OfflineMenu.AddResource('core_shoes', 99999999)" },
+    { "+99999999 Lõi trang trí", "OfflineMenu.AddResource('core_ornament', 99999999)" },
+    { "+99999999 Lõi đĩa ULT", "OfflineMenu.AddResource('core_disc', 99999999)" },
     { "+99999999 Viên nang XP (lên cấp)", "OfflineMenu.AddResource('capsule', 99999999)" },
     { "Mở khóa tất cả skin", "OfflineMenu.UnlockSkins()" },
     { "One hit: luôn bật (1 đòn chết quái)", "OfflineMenu.OneHitInfo()" },
-  { "+99999999 Xu kho báu Arch", "OfflineMenu.AddResource('hb', 99999999)" },
-  { "Mở vòng quay kho báu Arch", "OfflineMenu.OpenPanel('hunter/PrizeWheelPanel')" },
-  { "+99999999 Điểm đổi rương sự kiện", "OfflineMenu.AddResource('ackp', 99999999)" },
-  { "Mở shop trao đổi", "OfflineMenu.OpenPanel('activity/chest/ChestExchangePanel')" },
-  { "Mở rương", "OfflineMenu.OpenPanel('box/BoxPanel')" },
-  { "Mở vòng quay rương", "OfflineMenu.OpenPanel('box/BoxPrizeWheelPanel')" },
+    { "+99999999 Xu kho báu Arch", "OfflineMenu.AddResource('hb', 99999999)" },
+    { "+99999999 Điểm đổi rương sự kiện", "OfflineMenu.AddResource('ackp', 99999999)" },
   }
   function Menu.OneHitInfo() tip("One hit luôn bật trong bản menu: quái và boss chỉ có 1 máu") end
   function Menu.Patch()
