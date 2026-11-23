@@ -597,8 +597,8 @@ local function grantRewards(entries, sync)
           uids[#uids + 1] = tostring(euid)
         end
         -- Shown as the gift_equip item (SpecEquipment) with the piece in args;
-        -- equipment names have no ItemConfig row of their own. uids lets a
-        -- caller show the created pieces as "myequip" entries instead.
+        -- equipment names have no ItemConfig row of their own. uids lists the
+        -- created pieces for callers that report them one by one.
         shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args), uids = uids, tid = tid }
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
@@ -2214,10 +2214,30 @@ local function patchEquipDecompose()
   em.__offline_dec = true
 end
 
+-- Offline gear never goes to the mailbox: every piece is added to the bag.
+-- BoxPanel still shows COMMON.equip_mail ("inventory full, stored in the
+-- mailbox") unless a reward is a "myequip" entry, which the box reward icons
+-- cannot draw, so reword that tip instead.
+local function patchLang()
+  local lang = _ENV.LANG
+  if type(lang) ~= "table" or lang.__offline_lang or type(lang.GetTextData) ~= "function" then return end
+  local orig = lang.GetTextData
+  lang.GetTextData = function(a, b, c, ...)
+    local group, key = a, b
+    if a == lang then group, key = b, c end
+    if group == "COMMON" and key == "equip_mail" then
+      return "Your new gear has been added to your inventory"
+    end
+    return orig(a, b, c, ...)
+  end
+  lang.__offline_lang = true
+end
+
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
   patchCustomData()
   patchEquipDecompose()
+  patchLang()
   if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
   local res, _, sync = offlineResponse(group, name, data)
   local agent = self
