@@ -464,17 +464,24 @@ local function petGrade(dist)
 end
 
 local function equipTemplateId(key)
-  local cfgs = _ENV.ConfigMgr:GetConfig("equipment")
+  -- ConfigMgr:GetEquipConfig(id) indexes the equipment table by key, and the
+  -- client falls back to a "?" placeholder entry when the key is missing, so
+  -- return the key that holds this name rather than the row's id field.
+  local cm = _ENV.ConfigMgr
+  local cfgs = cm:GetConfig("equipment")
   if type(cfgs) ~= "table" then return nil end
+  local function holds(id)
+    local row = id and rawget(cfgs, id)
+    if type(row) ~= "table" then return false end
+    for _, f in pairs(row) do if f == key then return true end end
+    return false
+  end
+  local ok, mapped = pcall(cm.GetEquipTemplateIdByName, cm, key)
+  mapped = ok and math.tointeger(tonumber(mapped)) or nil
+  if holds(mapped) then return mapped end
   for k, v in pairs(cfgs) do
-    if type(v) == "table" then
-      for _, f in pairs(v) do
-        if f == key then
-          local id = tonumber(v.id) or tonumber(k)
-          if id then return math.floor(id) end
-        end
-      end
-    end
+    local id = math.tointeger(tonumber(k))
+    if id and type(v) == "table" and holds(id) then return id end
   end
   return nil
 end
@@ -1077,10 +1084,8 @@ local BOX_ROLLS = {
 local PROTECT_FLOOR = { box_adv = 2600, box_adv10 = 2600, box_epic = 2600, box_legend = 3300 }
 
 local function equipNameById(tid)
-  for k, v in pairs(_ENV.ConfigMgr:GetConfig("equipment") or {}) do
-    if type(v) == "table" and math.floor(tonumber(v.id) or tonumber(k) or -1) == tid then return v.name end
-  end
-  return nil
+  local row = rawget(_ENV.ConfigMgr:GetConfig("equipment") or {}, tid)
+  return type(row) == "table" and row.name or nil
 end
 
 local function boxPiece(pool)
@@ -2332,6 +2337,13 @@ RESPONSES = {
       end
     end
     print("[OFFLINE] OPEN_BOX " .. boxId .. " x" .. count .. " reward=" .. ser(reward))
+    for _, r in ipairs(granted) do
+      if r.tid then
+        local ok, c = pcall(_ENV.ConfigMgr.GetEquipConfig, _ENV.ConfigMgr, r.tid)
+        print("[OFFLINE] OPEN_BOX tid " .. r.tid .. " " .. tostring(r.args) .. " -> " ..
+          tostring(ok and type(c) == "table" and (c.name or c.icon) or c))
+      end
+    end
     -- box_module's callback treats a missing result as a failed open and
     -- fires BOX.OPEN_RESULT(0, nil) (the "wish reset" path), so send 0.
     return okRes({ reward = reward }), sync
