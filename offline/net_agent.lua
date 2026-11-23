@@ -2477,10 +2477,11 @@ RESPONSES = {
         and cfg.model ~= "free" and cfg.model ~= "money" then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " model " .. tostring(cfg.model) .. " needs real billing")
     end
-    local entries = {}
+    local entries, subSkus = {}, {}
     for _, e in ipairs(rewardEntries(seq(cfg.itemList))) do
       local sub = e.id == "sku" and _ENV.ConfigMgr:GetSKUConfig(tostring(e.args))
       if type(sub) == "table" then
+        subSkus[#subSkus + 1] = { id = tostring(e.args), cfg = sub }
         for _ = 1, math.max(1, math.floor(e.count or 1)) do
           for _, x in ipairs(rewardEntries(seq(sub.itemList))) do entries[#entries + 1] = x end
         end
@@ -2496,22 +2497,33 @@ RESPONSES = {
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " short of " .. tostring(cfg.model))
     end
     local pur = moduleState("Purchase")
-    local cl = cfg.conditionLimit
-    if type(cl) == "table" then
-      local period, index, limit = cfgAt(cl, 1), tonumber(cfgAt(cl, 2)), tonumber(cfgAt(cl, 3))
-      local fn = purchasePeriodFn(period)
-      if type(fn) ~= "function" or not index or not limit then
-        return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " bad conditionLimit " .. ser(cl))
+    pur.lpc = tbl(pur.lpc)
+    -- A bundle sku (e.g. Daily Deal "buy all") also uses up each sku it
+    -- contains, so those cards show as bought and cannot be bought again.
+    local limited = { { id = sku, cfg = cfg } }
+    for _, x in ipairs(subSkus) do limited[#limited + 1] = x end
+    local bumps = {}
+    for _, x in ipairs(limited) do
+      local cl = x.cfg.conditionLimit
+      if type(cl) == "table" then
+        local period, index, limit = cfgAt(cl, 1), tonumber(cfgAt(cl, 2)), tonumber(cfgAt(cl, 3))
+        local fn = purchasePeriodFn(period)
+        if type(fn) ~= "function" or not index or not limit then
+          return failRes("PURCHASE.ECO_PURCHASE " .. x.id .. " bad conditionLimit " .. ser(cl))
+        end
+        local pnum = fn()
+        local rec = tbl(pur.lpc[period])
+        if rec.i ~= pnum then rec = { i = pnum, c = {} } end
+        rec.c = tbl(rec.c)
+        pur.lpc[period] = rec
+        if getBits(rec.c, index, 4) >= limit then
+          return failRes("PURCHASE.ECO_PURCHASE " .. x.id .. " limit reached")
+        end
+        bumps[#bumps + 1] = { rec = rec, index = index }
       end
-      local pnum = fn()
-      pur.lpc = tbl(pur.lpc)
-      local rec = tbl(pur.lpc[period])
-      if rec.i ~= pnum then rec = { i = pnum, c = {} } end
-      rec.c = tbl(rec.c)
-      local used = getBits(rec.c, index, 4)
-      if used >= limit then return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " limit reached") end
-      setBits(rec.c, index, 4, used + 1)
-      pur.lpc[period] = rec
+    end
+    for _, b in ipairs(bumps) do
+      setBits(b.rec.c, b.index, 4, getBits(b.rec.c, b.index, 4) + 1)
     end
     local sync = { Purchase = pur }
     if currencyCost > 0 then
@@ -2519,7 +2531,9 @@ RESPONSES = {
       if not paid then return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " short of " .. tostring(short)) end
     end
     pur.pcr = tbl(pur.pcr)
-    pur.pcr[sku] = (tonumber(pur.pcr[sku]) or 0) + 1
+    for _, x in ipairs(limited) do
+      pur.pcr[x.id] = (tonumber(pur.pcr[x.id]) or 0) + 1
+    end
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] PURCHASE.ECO_PURCHASE " .. sku .. " reward=" .. ser(reward))
     return okRes({ reward = reward }), sync
