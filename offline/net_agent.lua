@@ -1381,9 +1381,13 @@ RESPONSES = {
   -- Player chest state is ACTIVITY.c {el = exchange level, erc = 4-bit
   -- per-index exchange counts}; offline every exchange level is unlocked.
   ["QUERY.SYNC_ACTIVITY"] = function(data)
-    if tostring(tbl(data).type) ~= "CHEST" then return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end
     local now = os.time()
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    -- Other activities (e.g. FRONTLINE) index activity_pool[type].data, so
+    -- they get an empty schedule: present, but with no round running.
+    if tostring(tbl(data).type) ~= "CHEST" then
+      return { ret_code = protoCode("SUCCESS", 1), data = ser({ data = {}, daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }) }
+    end
     -- condition_mgr.activityOpenTime parses ConfigMgr.activity_chest as
     -- "<x>:YYYYMMDDhhmm|..." (normally server config); open it from 2020.
     _ENV.ConfigMgr.activity_chest = _ENV.ConfigMgr.activity_chest or "offline:202001010000|209912312359"
