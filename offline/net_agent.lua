@@ -1522,13 +1522,18 @@ RESPONSES = {
     local fl = moduleState("FRONTLINE")
     local round = frontlineRoll(fl)
     fl.ds = tbl(fl.ds)
-    local score = math.floor(tonumber(data.score) or 0)
-    if score <= 0 then
-      local wave = math.floor(tonumber(data.monster_wave) or 0)
-      score = wave > 0 and (400 * wave + (wave - 1) * wave * 35) or 0
-    end
-    if score > (tonumber(fl.ds[round]) or 0) then fl.ds[round] = score end
-    return okRes({ score = score }), { FRONTLINE = fl }
+    -- BattleScorePanel reads score as {wave, last-wave kill, perfect, total}.
+    -- monster_rate is the percent of the last wave still alive.
+    local wave = math.max(0, math.floor(tonumber(data.monster_wave) or 0))
+    local rate = math.min(100, math.max(0, math.floor(tonumber(data.monster_rate) or 100)))
+    local perfect = math.max(0, math.floor(tonumber(data.perfect_times) or 0))
+    local waveScore = wave > 0 and (400 * wave + (wave - 1) * wave * 35) or 0
+    local rateScore = (100 - rate) * 4
+    local perfectScore = perfect * 100
+    local score = waveScore + rateScore + perfectScore
+    local isNew = 0
+    if score > (tonumber(fl.ds[round]) or 0) then fl.ds[round] = score; isNew = 1 end
+    return okRes({ score = { waveScore, rateScore, perfectScore, score }, is_new = isNew }), { FRONTLINE = fl }
   end,
   -- Auction is a live player market; offline it is open and empty.
   ["AUCTION.REQUEST_ALL_DATA"] = function() return okRes({ list = {}, max_count = 10 }) end,
