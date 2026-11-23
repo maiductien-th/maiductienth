@@ -1009,8 +1009,8 @@ local POOL_SHOPS = { "coin", "gem", "rmb", "tb" }
 -- the daily deal packs give. Its catalogue only comes from the server, so
 -- offline it sells this fixed list: {reward, price, daily limit}.
 -- Dynamic shop "1" is the Arch / Rewinding Treasure exchange (DynamicShopPanel
--- with WishPointsStoreItem rows), priced in wp, the wish points its header
--- shows. LOTTERY.START_WHEEL earns wp on the wish-points wheel.
+-- with WishPointsStoreItem rows), priced in wp, the wish-points wheel's own
+-- draw currency, as the shop config's "wp" rows are.
 local DYNAMIC_FALLBACK = {
   ["1"] = {
     { "key_rare|1", "wp|300", 5 },
@@ -2293,12 +2293,6 @@ RESPONSES = {
     end
     st.c = (tonumber(st.c) or 0) + count
     local reward = grantRewards(entries, sync)
-    if t == _ENV.GameDef.LOTTERY.wish_points then
-      -- One wish point per wheel currency a draw costs, so the exchange
-      -- (priced in wp) is reachable; kept out of the shown reward list.
-      local per = math.floor(tonumber(tbl(wcfg.cost).cost) or 0)
-      if per > 0 then grantRewards({ { id = "wp", count = per * count } }, sync) end
-    end
     print("[OFFLINE] LOTTERY.START_WHEEL " .. t .. " x" .. count .. " idx=" .. ser(indexes) .. " reward=" .. ser(reward))
     -- BoxSoltMachine.RunWheel ipairs res.id and looks each reward string up
     -- in its slot list to know where the spin stops; a plain string leaves
