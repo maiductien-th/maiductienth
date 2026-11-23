@@ -1022,7 +1022,52 @@ RESPONSES = {
   -- literal string. Empty table = "nothing available offline", which each
   -- caller already handles (it is also what an empty server pool returns).
   ["QUERY.ACHIEVEMENT"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
-  ["QUERY.SYNC_ACTIVITY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  -- activity_module_chest reads activity_pool.CHEST.data.id (an activity_chest
+  -- row) to find its exchange table; only the CHEST activity runs offline.
+  -- Player chest state is ACTIVITY.c {el = exchange level, erc = 4-bit
+  -- per-index exchange counts}; offline every exchange level is unlocked.
+  ["QUERY.SYNC_ACTIVITY"] = function(data)
+    if tostring(tbl(data).type) ~= "CHEST" then return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end
+    local now = os.time()
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    act.c.id = act.c.id or "act1"
+    act.c.el = math.max(tonumber(act.c.el) or 0, 5)
+    act.c.erc = tbl(act.c.erc)
+    local body = { data = { id = act.c.id }, daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }
+    print("[OFFLINE] QUERY.SYNC_ACTIVITY CHEST " .. act.c.id)
+    return { ret_code = protoCode("SUCCESS", 1), data = ser(body) }, { ACTIVITY = act }
+  end,
+  ["ACTIVITY.CLAIM_EXCHANGE"] = function(data)
+    data = tbl(data)
+    local id, count = tostring(data.id or ""), math.max(1, math.floor(tonumber(data.count) or 1))
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    act.c.erc = tbl(act.c.erc)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    local cfg = type(chest) == "table" and _ENV.ConfigMgr:GetChestExchangeById(chest.exchange_reward_path, id)
+    if type(cfg) ~= "table" then return failRes("ACTIVITY.CLAIM_EXCHANGE unknown " .. id) end
+    local idx = math.floor(tonumber(cfg.index) or 0)
+    local used = getBits(act.c.erc, idx, 4)
+    if (tonumber(act.c.el) or 0) < (tonumber(cfg.level) or 0) then return failRes("ACTIVITY.CLAIM_EXCHANGE " .. id .. " locked") end
+    if used + count > (tonumber(cfg.limit) or 0) then return failRes("ACTIVITY.CLAIM_EXCHANGE " .. id .. " limit") end
+    local entries = {}
+    for _ = 1, count do
+      for _, e in ipairs(rewardEntries(cfg.reward)) do entries[#entries + 1] = e end
+    end
+    if #entries == 0 then return failRes("ACTIVITY.CLAIM_EXCHANGE " .. id .. " no reward") end
+    local sync = { ACTIVITY = act }
+    local price = tbl(cfg.price)
+    if price.id ~= nil then
+      local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * count })
+      if not paid then return failRes("ACTIVITY.CLAIM_EXCHANGE short of " .. tostring(short)) end
+    end
+    setBits(act.c.erc, idx, 4, used + count)
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ACTIVITY.CLAIM_EXCHANGE " .. id .. " x" .. count .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
   -- query_data.QueryLottery stores the whole response as
   -- lottery_pool[type]; lottery_module.GetLotteryItemList reads its
   -- common / rare lists of "id|count|args" strings.
@@ -2011,7 +2056,7 @@ if MENU_BUILD then
   -- reach the C# battle, which keeps its own copy.
   local NAMES = {
     coin = "Vàng", rmb = "Zeno", stone = "Quặng lục lam", gem = "Đá quý",
-    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP", hb = "Xu kho báu Arch",
+    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP", hb = "Xu kho báu Arch", ackp = "Điểm đổi rương sự kiện",
   }
   local PRESET = {
     { "+99999999 Vàng", "OfflineMenu.AddResource('coin', 99999999)" },
@@ -2024,6 +2069,8 @@ if MENU_BUILD then
     { "One hit: luôn bật (1 đòn chết quái)", "OfflineMenu.OneHitInfo()" },
   { "+99999999 Xu kho báu Arch", "OfflineMenu.AddResource('hb', 99999999)" },
   { "Mở vòng quay kho báu Arch", "OfflineMenu.OpenPanel('hunter/PrizeWheelPanel')" },
+  { "+99999999 Điểm đổi rương sự kiện", "OfflineMenu.AddResource('ackp', 99999999)" },
+  { "Mở shop trao đổi", "OfflineMenu.OpenPanel('activity/chest/ChestExchangePanel')" },
   { "Mở vòng quay rương", "OfflineMenu.OpenPanel('box/BoxPrizeWheelPanel')" },
   }
   function Menu.OneHitInfo() tip("One hit luôn bật trong bản menu: quái và boss chỉ có 1 máu") end
