@@ -1649,6 +1649,7 @@ RESPONSES = {
         local maxE = energyParams()
         if en.e < maxE and (tonumber(en.tst) or 0) <= 0 then en.tst = os.time() end
         sync.ENERGY = en
+        bumpRecord(sync, 2, c.count)
         print("[OFFLINE] BATTLE.START " .. stage .. " energy " .. e .. " -> " .. en.e)
       end
     end
@@ -1716,6 +1717,7 @@ RESPONSES = {
       local coinId = _ENV.GameDef.ITEM_ID and _ENV.GameDef.ITEM_ID.COIN or "coin"
       eco.d[coinId] = (tonumber(eco.d[coinId]) or 0) + math.floor(tonumber(data.coin) or 0)
       sync.ECO = eco
+      bumpRecord(sync, 1, math.floor(tonumber(data.coin) or 0))
       local cfg = _ENV.ConfigMgr:GetStageConfig(tostring(data.stage_id or ""))
       if type(cfg) == "table" and tonumber(cfg.index) then
         local adv = moduleState("ADV")
