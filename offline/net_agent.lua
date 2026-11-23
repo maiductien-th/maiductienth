@@ -1263,6 +1263,20 @@ local function lotteryPool(t)
   end
   return common, rare
 end
+-- LOTTERY.pw[data_type].tc counts today's free draws used: StatrWheelFree
+-- only sends while GetFreeDrawsCount < 1, so the daily reset has to reach
+-- the client before the next free spin (QUERY.LOTTERY on panel open).
+local function prizeWheelState(t)
+  local wcfg = tbl((_ENV.GameDef.PRIZE_WHEEL_CONFIG or {})[t])
+  if not wcfg.data_type then return nil end
+  local lot = moduleState("LOTTERY")
+  lot.pw = tbl(lot.pw)
+  local st = tbl(lot.pw[wcfg.data_type])
+  lot.pw[wcfg.data_type] = st
+  local today = os.date("%Y%m%d")
+  if st.fd ~= today then st.fd, st.tc = today, 0 end
+  return st, lot
+end
 local function hunterLevelRow(lv)
   for _, r in ipairs(_ENV.ConfigMgr:GetConfig("hunter_level_reward") or {}) do
     if tonumber(r.level) == lv then return r end
@@ -1444,7 +1458,9 @@ RESPONSES = {
     local now = 0
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or 0 end)
     print("[OFFLINE] QUERY.LOTTERY " .. t .. " common=" .. #common .. " rare=" .. #rare)
-    return { ret_code = protoCode("SUCCESS", 1), common = common, rare = rare, next_time = now + 86400 }
+    local _, lot = prizeWheelState(t)
+    return { ret_code = protoCode("SUCCESS", 1), common = common, rare = rare, next_time = now + 86400 },
+      lot and { LOTTERY = lot } or nil
   end,
   ["QUERY.DYNAMIC_SHOP"] = function(data)
     local t = tostring(tbl(data).type or "")
@@ -1939,10 +1955,7 @@ RESPONSES = {
     local st = tbl(lot.pw[wcfg.data_type])
     lot.pw[wcfg.data_type] = st
     local sync = { LOTTERY = lot }
-    -- tc counts today's free draws used: StatrWheelFree only sends while
-    -- GetFreeDrawsCount < 1 and GetDailyTimer shows no timer at tc <= 0.
-    local today = os.date("%Y%m%d")
-    if st.fd ~= today then st.fd, st.tc = today, 0 end
+    if not hunter then prizeWheelState(t) end
     if data.is_free == true or tonumber(data.is_free) == 1 then
       if (tonumber(st.tc) or 0) >= 1 then return failRes("LOTTERY.START_WHEEL no free draw") end
       st.tc = 1
