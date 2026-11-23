@@ -487,7 +487,21 @@ local function poolRows(poolId)
     if r.id == poolId and r.name ~= nil then out[#out + 1] = r
     elseif r.id == nil then for _, x in pairs(r) do if type(x) == "table" and x.id == poolId then out[#out + 1] = x end end end
   end
-  for _, r in pairs(_ENV.ConfigMgr:GetConfig("reward_pool") or {}) do add(r) end
+  -- reward_pool is keyed by pool id (ConfigMgr:GetRewardPoolConfig) and
+  -- each value is the pool's row list; rows need not repeat the id.
+  local ok, pool = pcall(function() return _ENV.ConfigMgr:GetRewardPoolConfig(poolId) end)
+  if ok and type(pool) == "table" then
+    if pool.name ~= nil then out[#out + 1] = pool
+    else
+      for _, x in pairs(pool) do
+        if type(x) == "table" and x.name ~= nil then out[#out + 1] = x end
+      end
+    end
+  end
+  if #out == 0 then
+    for _, r in pairs(_ENV.ConfigMgr:GetConfig("reward_pool") or {}) do add(r) end
+  end
+  if #out == 0 then print("[OFFLINE] reward pool " .. tostring(poolId) .. " empty: " .. ser(pool)) end
   return out
 end
 
@@ -504,6 +518,10 @@ local function expandRandom(entries, all, depth)
   local out = {}
   for _, e in ipairs(entries) do
     local cfg = items[e.id]
+    if cfg == nil then
+      local ok, c = pcall(function() return _ENV.ConfigMgr:GetItemConfig(e.id) end)
+      if ok then cfg = c end
+    end
     local pid = e.__pool or type(cfg) == "table" and cfg.type == "RandomItem" and type(cfg.params) == "table" and cfg.params.pool_id
     if pid and depth < 4 then
       local rows = poolRows(pid)
@@ -743,7 +761,7 @@ end
 
 -- No client config holds the server's shop roll; one entry per pool is
 -- picked by weight, with no discount (DISCOUNT_ENUM index 1 = 100%).
-local POOL_SHOPS = { "coin", "gem", "tb" }
+local POOL_SHOPS = { "coin", "gem", "rmb", "tb" }
 local dynamicShopRows
 local function noDiscountIndex()
   local de = _ENV.GameDef and _ENV.GameDef.DISCOUNT_ENUM
@@ -991,6 +1009,10 @@ local RESPONSES = {
   -- query_data.QueryLottery stores the whole response as
   -- lottery_pool[type]; lottery_module.GetLotteryItemList reads its
   -- common / rare lists of "id|count|args" strings.
+  -- potential_module CheckIncrease / CheckIncreaseTicket ask the server to
+  -- apply time-based regen; nothing regenerates offline beyond the synced state.
+  ["POTENTIAL.INCREASE"] = function() return okRes() end,
+  ["POTENTIAL.INCREASE_TICKET"] = function() return okRes() end,
   ["QUERY.LOTTERY"] = function(data)
     local t = math.floor(tonumber(tbl(data).type) or 0)
     local common, rare = lotteryPool()
@@ -1919,6 +1941,18 @@ if MENU_BUILD then
     fireSync(NetAgent, { ECO = eco })
     tip("+" .. amount .. " " .. (NAMES[id] or id) .. ": " .. before .. " -> " .. eco.d[id])
   end
+  function Menu.OpenPanel(name)
+    -- GameHelper.OpenPanel is a raw lua_CFunction that reads a table at the
+    -- top of the stack, so the call needs a (possibly empty) args table.
+    for _, call in ipairs({
+      function() return _ENV.GameHelper.OpenPanel(name, {}) end,
+      function() return _ENV.GameHelper.OpenPanel(name, nil, {}) end,
+    }) do
+      local ok, err = pcall(call)
+      print("[OFFLINE-MENU] OpenPanel " .. tostring(name) .. " ok=" .. tostring(ok) .. " " .. tostring(err))
+      if ok then return end
+    end
+  end
   function Menu.UnlockSkins()
     local pl = moduleState("PLAYER")
     local sl = tbl(pl.sl)
@@ -1954,6 +1988,8 @@ if MENU_BUILD then
     { "+99999999 Viên nang XP (lên cấp)", "OfflineMenu.AddResource('capsule', 99999999)" },
     { "Mở khóa tất cả skin", "OfflineMenu.UnlockSkins()" },
     { "One hit: luôn bật (1 đòn chết quái)", "OfflineMenu.OneHitInfo()" },
+  { "Mở vòng quay kho báu Arch", "OfflineMenu.OpenPanel('hunter/PrizeWheelPanel')" },
+  { "Mở vòng quay rương", "OfflineMenu.OpenPanel('box/BoxPrizeWheelPanel')" },
   }
   function Menu.OneHitInfo() tip("One hit luôn bật trong bản menu: quái và boss chỉ có 1 máu") end
   function Menu.Patch()
