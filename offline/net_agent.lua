@@ -675,7 +675,7 @@ local function rewardsGrantable(entries)
       if not petTemplateId(e.args) then return false, e.args end
     elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
         and kind ~= "PetCapacity" and kind ~= "MonthCard" and kind ~= "MonthCardTrial" and kind ~= "Skin"
-        and not realIdOf(e.id) then
+        and kind ~= "NoAD" and not realIdOf(e.id) then
       return false, e.id
     end
   end
@@ -751,6 +751,9 @@ local function grantRewards(entries, sync)
       else
         print("[OFFLINE] reward UNRESOLVED pet " .. tostring(e.args))
       end
+    elseif type(cfg) == "table" and cfg.type == "NoAD" then
+      -- GM.f already carries NO_AD offline; nothing else to store.
+      shown[#shown + 1] = { id = id, count = n }
     elseif type(cfg) == "table" and cfg.type == "Energy" then
       -- energy_module.GetEnergy reads ENERGY.e.
       sync.ENERGY = sync.ENERGY or moduleState("ENERGY")
@@ -933,6 +936,21 @@ end
 -- No client config holds the server's shop roll; one entry per pool is
 -- picked by weight, with no discount (DISCOUNT_ENUM index 1 = 100%).
 local POOL_SHOPS = { "coin", "gem", "rmb", "tb" }
+-- The Daily Deal exchange (dynamic shop "2") is priced in dsop, the points
+-- the daily deal packs give. Its catalogue only comes from the server, so
+-- offline it sells this fixed list: {reward, price, daily limit}.
+local DYNAMIC_FALLBACK = {
+  ["2"] = {
+    { "key_rare|1", "dsop|30", 5 },
+    { "key_common|3", "dsop|10", 5 },
+    { "stone|100", "dsop|15", 5 },
+    { "coin|50000", "dsop|10", 5 },
+    { "tdt|2", "dsop|20", 3 },
+    { "pdt|1", "dsop|25", 3 },
+    { "hb|10", "dsop|20", 3 },
+    { "pet_xp|200", "dsop|20", 3 },
+  },
+}
 local dynamicShopRows
 local function noDiscountIndex()
   local de = _ENV.GameDef and _ENV.GameDef.DISCOUNT_ENUM
@@ -998,6 +1016,11 @@ dynamicShopRows = function(shopType)
     if lt == "" then lt = nil end
     rows[#rows + 1] = { cfg = r, reward = itemStr(r.reward), price = itemStr(r.price),
       limit = math.floor(tonumber(r.dailyLimit) or 999), limitType = lt }
+  end
+  if #rows == 0 and DYNAMIC_FALLBACK[shopType] then
+    for i, r in ipairs(DYNAMIC_FALLBACK[shopType]) do
+      rows[i] = { reward = r[1], price = r[2], limit = r[3], limitType = 1, weight = i }
+    end
   end
   return rows
 end
@@ -1417,7 +1440,7 @@ RESPONSES = {
     local t = tostring(tbl(data).type or "")
     local rows = {}
     for _, r in ipairs(dynamicShopRows(t)) do
-      rows[#rows + 1] = { reward = r.reward, price = r.price, limit = r.limit, limitType = r.limitType }
+      rows[#rows + 1] = { reward = r.reward, price = r.price, limit = r.limit, limitType = r.limitType, weight = r.weight }
     end
     local now = 0
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or 0 end)
@@ -1919,6 +1942,21 @@ RESPONSES = {
       if hunter then return _ENV.HunterModule:GetHunterItemList(t) end
       return _ENV.LotteryModule:GetLotteryItemList(t)
     end)
+    if hunter and (not ok or type(list) ~= "table" or #list == 0) then
+      -- hunter_module.GetHunterItemList reads QueryData's cached QUERY.LOTTERY
+      -- answer: 8 commons with the 2 rares at slots 5 and 10.
+      local common, rare = lotteryPool()
+      list = {}
+      local ci, ri = 1, 1
+      for pos = 1, #common + math.min(2, #rare) do
+        if (pos == 5 or pos == 10) and rare[ri] then
+          list[#list + 1] = rare[ri]; ri = ri + 1
+        elseif common[ci] then
+          list[#list + 1] = common[ci]; ci = ci + 1
+        end
+      end
+      ok = true
+    end
     if not ok or type(list) ~= "table" or #list == 0 then
       return failRes("LOTTERY.START_WHEEL no pool for " .. t .. " " .. tostring(list))
     end
@@ -2124,7 +2162,17 @@ RESPONSES = {
         and cfg.model ~= "free" and cfg.model ~= "money" then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " model " .. tostring(cfg.model) .. " needs real billing")
     end
-    local entries = rewardEntries(seq(cfg.itemList))
+    local entries = {}
+    for _, e in ipairs(rewardEntries(seq(cfg.itemList))) do
+      local sub = e.id == "sku" and _ENV.ConfigMgr:GetSKUConfig(tostring(e.args))
+      if type(sub) == "table" then
+        for _ = 1, math.max(1, math.floor(e.count or 1)) do
+          for _, x in ipairs(rewardEntries(seq(sub.itemList))) do entries[#entries + 1] = x end
+        end
+      else
+        entries[#entries + 1] = e
+      end
+    end
     local grantable, missing = rewardsGrantable(entries)
     if not grantable then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " reward not supported offline: " .. tostring(missing))
