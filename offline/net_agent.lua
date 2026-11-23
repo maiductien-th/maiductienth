@@ -1030,13 +1030,16 @@ RESPONSES = {
     if tostring(tbl(data).type) ~= "CHEST" then return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end
     local now = os.time()
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or now end)
+    -- condition_mgr.activityOpenTime parses ConfigMgr.activity_chest as
+    -- "<x>:YYYYMMDDhhmm|..." (normally server config); open it from 2020.
+    _ENV.ConfigMgr.activity_chest = _ENV.ConfigMgr.activity_chest or "offline:202001010000|209912312359"
     local act = moduleState("ACTIVITY")
     act.c = tbl(act.c)
-    act.c.id = act.c.id or "act1"
+    if type(act.c.id) ~= "string" or act.c.id == "" then act.c.id = "act1" end
     act.c.el = math.max(tonumber(act.c.el) or 0, 5)
     act.c.erc = tbl(act.c.erc)
     local body = { data = { id = act.c.id }, daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }
-    print("[OFFLINE] QUERY.SYNC_ACTIVITY CHEST " .. act.c.id)
+    print("[OFFLINE] QUERY.SYNC_ACTIVITY CHEST id=" .. tostring(act.c.id) .. " el=" .. tostring(act.c.el))
     return { ret_code = protoCode("SUCCESS", 1), data = ser(body) }, { ACTIVITY = act }
   end,
   ["ACTIVITY.CLAIM_EXCHANGE"] = function(data)
@@ -2007,6 +2010,7 @@ if MENU_BUILD then
     st._cheat = type(st._cheat) == "table" and st._cheat or {}
     return st._cheat
   end
+  local NAMES
   local function tip(msg)
     print("[OFFLINE-MENU] " .. msg)
     pcall(function() _ENV.GameHelper.ShowUITips(msg) end)
@@ -2021,6 +2025,13 @@ if MENU_BUILD then
     tip("+" .. amount .. " " .. (NAMES[id] or id) .. ": " .. before .. " -> " .. eco.d[id])
   end
   function Menu.OpenPanel(name)
+    if tostring(name):find("activity/chest", 1, true) then
+      pcall(function()
+        print("[OFFLINE-MENU] chest open=" .. tostring(_ENV.ActivityModule:IsOpen()) ..
+          " sync=" .. ser(_ENV.QueryData:GetSyncActivity("CHEST")) ..
+          " cfg=" .. tostring(_ENV.ConfigMgr:GetActivityChestById("act1") ~= nil))
+      end)
+    end
     -- GameHelper.OpenPanel is a raw lua_CFunction that reads a table at the
     -- top of the stack, so the call needs a (possibly empty) args table.
     for _, call in ipairs({
@@ -2054,7 +2065,7 @@ if MENU_BUILD then
   -- character table in assets/scg.ab so every monster and boss has maxHp 1.
   -- Patching the table at runtime (loadCfgFile4CS + ReloadConfig) did not
   -- reach the C# battle, which keeps its own copy.
-  local NAMES = {
+  NAMES = {
     coin = "Vàng", rmb = "Zeno", stone = "Quặng lục lam", gem = "Đá quý",
     core_weapon = "Lõi vũ khí", capsule = "Viên nang XP", hb = "Xu kho báu Arch", ackp = "Điểm đổi rương sự kiện",
   }
