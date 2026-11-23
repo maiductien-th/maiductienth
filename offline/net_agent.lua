@@ -202,6 +202,13 @@ local function initState()
     if type(st.PLAYER) == "table" then st.PLAYER.dg = 0 end
     if type(st.SHOP) == "table" then st.SHOP.tph = {}; st.SHOP.tsl = {} end
     if type(st.BOX) == "table" then st.BOX.ot = {} end
+    -- vip_module.CanClaimDailyReward: an active card (mc[id].ft >= today)
+    -- can claim while ccd > 0.
+    if type(st.VIP) == "table" and type(st.VIP.mc) == "table" then
+      for _, c in pairs(st.VIP.mc) do
+        if type(c) == "table" and (tonumber(c.ft) or 0) >= day then c.ccd = 1 end
+      end
+    end
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
@@ -463,9 +470,71 @@ local function configUseReward(itemId)
   return type(row) == "table" and row.UseReward or nil
 end
 
+-- reward_pool rows: {id = pool id, weight, type = item|equip|pool, name,
+-- param}. RandomItem items (random_core, gem boxes) carry
+-- params.pool_id; each unit rolls one row of that pool.
+local function poolRows(poolId)
+  local out = {}
+  local function add(r)
+    if type(r) ~= "table" then return end
+    if r.id == poolId and r.name ~= nil then out[#out + 1] = r
+    elseif r.id == nil then for _, x in pairs(r) do if type(x) == "table" and x.id == poolId then out[#out + 1] = x end end end
+  end
+  for _, r in pairs(_ENV.ConfigMgr:GetConfig("reward_pool") or {}) do add(r) end
+  return out
+end
+
+local function poolEntry(r)
+  local n = math.max(1, math.floor(tonumber(r.param) or 1))
+  if r.type == "equip" then return { id = "gift_equip", count = 1, args = tostring(r.name) } end
+  return { id = tostring(r.name), count = n }
+end
+
+-- all = true lists every possible outcome (for rewardsGrantable).
+local function expandRandom(entries, all, depth)
+  depth = depth or 0
+  local items = _ENV.ConfigMgr:GetConfig("item") or {}
+  local out = {}
+  for _, e in ipairs(entries) do
+    local cfg = items[e.id]
+    local pid = e.__pool or type(cfg) == "table" and cfg.type == "RandomItem" and type(cfg.params) == "table" and cfg.params.pool_id
+    if pid and depth < 4 then
+      local rows = poolRows(pid)
+      local picks = {}
+      if all then picks = rows
+      elseif #rows > 0 then
+        for _ = 1, math.floor(e.count or 1) do
+          local total = 0
+          for _, r in ipairs(rows) do total = total + (tonumber(r.weight) or 1) end
+          local roll = math.random() * total
+          local pick = rows[#rows]
+          for _, r in ipairs(rows) do
+            roll = roll - (tonumber(r.weight) or 1)
+            if roll <= 0 then pick = r break end
+          end
+          picks[#picks + 1] = pick
+        end
+      end
+      if #rows == 0 then out[#out + 1] = e end
+      for _, r in ipairs(picks) do
+        local sub = r.type == "pool" and { id = "__pool", pool = tostring(r.name) } or poolEntry(r)
+        if sub.id == "__pool" then
+          for _, x in ipairs(expandRandom({ { id = "__p", count = 1, __pool = sub.pool } }, all, depth + 1)) do out[#out + 1] = x end
+        else
+          out[#out + 1] = sub
+        end
+      end
+    else
+      out[#out + 1] = e
+    end
+  end
+  return out
+end
+
 -- True when grantRewards knows how to grant every entry; callers that
 -- charge for a reward check this first so nothing is paid for nothing.
 local function rewardsGrantable(entries)
+  entries = expandRandom(entries, true)
   local items = _ENV.ConfigMgr:GetConfig("item") or {}
   for _, e in ipairs(entries) do
     local cfg = items[e.id]
@@ -473,7 +542,7 @@ local function rewardsGrantable(entries)
     if e.id == "gift_equip" then
       if not equipTemplateId(e.args) then return false, e.args end
     elseif kind ~= "Economic" and kind ~= "Energy" and kind ~= "Capacity"
-        and kind ~= "PetCapacity"
+        and kind ~= "PetCapacity" and kind ~= "MonthCard"
         and not realIdOf(e.id) then
       return false, e.id
     end
@@ -482,6 +551,7 @@ local function rewardsGrantable(entries)
 end
 
 local function grantRewards(entries, sync)
+  entries = expandRandom(entries, false)
   local items = _ENV.ConfigMgr:GetConfig("item") or {}
   local shown = {}
   for _, e in ipairs(entries) do
@@ -519,6 +589,22 @@ local function grantRewards(entries, sync)
       -- pet_module.GetPetExtraCapacity reads PET.ac.
       sync.PET = sync.PET or moduleState("PET")
       sync.PET.ac = (tonumber(sync.PET.ac) or 0) + n
+      shown[#shown + 1] = { id = id, count = n }
+    elseif type(cfg) == "table" and cfg.type == "MonthCard" then
+      -- vip_module_month_card: VIP.mc[card].ft is the last active date
+      -- (GetDateNumber form); ccd > 0 lets today's daily gift be claimed.
+      local cid = type(cfg.params) == "table" and tostring(cfg.params.id) or id
+      sync.VIP = sync.VIP or moduleState("VIP")
+      sync.VIP.mc = type(sync.VIP.mc) == "table" and sync.VIP.mc or {}
+      local c = type(sync.VIP.mc[cid]) == "table" and sync.VIP.mc[cid] or {}
+      local base = os.time()
+      local ft = tonumber(c.ft) or 0
+      if ft >= tonumber(os.date("%Y%m%d", base)) then
+        base = os.time({ year = ft // 10000, month = ft // 100 % 100, day = ft % 100, hour = 12 })
+      end
+      c.ft = tonumber(os.date("%Y%m%d", base + 30 * 86400 * n - (ft > 0 and 0 or 86400)))
+      c.ccd = 1
+      sync.VIP.mc[cid] = c
       shown[#shown + 1] = { id = id, count = n }
     elseif type(cfg) == "table" and cfg.type == "Economic" then
       sync.ECO = sync.ECO or moduleState("ECO")
@@ -851,6 +937,31 @@ local function techCost(id, kind)
   return ok and tonumber(v) or nil
 end
 
+-- hunter_reward_pool: {id, reward, type = common|rare, weight}.
+local function lotteryRows()
+  local rows = {}
+  for _, r in pairs(_ENV.ConfigMgr:GetConfig("hunter_reward_pool") or {}) do
+    if type(r) == "table" and r.reward ~= nil then
+      local str = itemStr(r.reward)
+      rows[str] = { type = r.type, weight = tonumber(r.weight) or 1, id = r.id }
+    end
+  end
+  return rows
+end
+local function lotteryPool()
+  local common, rare = {}, {}
+  local ids = {}
+  for str, r in pairs(lotteryRows()) do ids[#ids + 1] = { str = str, r = r } end
+  table.sort(ids, function(a, b) return a.r.weight > b.r.weight or (a.r.weight == b.r.weight and a.str < b.str) end)
+  for _, x in ipairs(ids) do
+    if x.r.type == "rare" then
+      if #rare < 4 then rare[#rare + 1] = x.str end
+    elseif #common < 8 then
+      common[#common + 1] = x.str
+    end
+  end
+  return common, rare
+end
 local RESPONSES = {
   -- CHECK_SERVER_CONFIG response { result 0 : *DictionaryStr }: no overrides.
   ["BASE.CHECK_SERVER_CONFIG"] = function(data)
@@ -870,7 +981,17 @@ local RESPONSES = {
   -- caller already handles (it is also what an empty server pool returns).
   ["QUERY.ACHIEVEMENT"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
   ["QUERY.SYNC_ACTIVITY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
-  ["QUERY.LOTTERY"] = function() return { ret_code = protoCode("SUCCESS", 1), data = "{}" } end,
+  -- query_data.QueryLottery stores the whole response as
+  -- lottery_pool[type]; lottery_module.GetLotteryItemList reads its
+  -- common / rare lists of "id|count|args" strings.
+  ["QUERY.LOTTERY"] = function(data)
+    local t = math.floor(tonumber(tbl(data).type) or 0)
+    local common, rare = lotteryPool()
+    local now = 0
+    pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or 0 end)
+    print("[OFFLINE] QUERY.LOTTERY " .. t .. " common=" .. #common .. " rare=" .. #rare)
+    return { ret_code = protoCode("SUCCESS", 1), common = common, rare = rare, next_time = now + 86400 }
+  end,
   ["QUERY.DYNAMIC_SHOP"] = function(data)
     local t = tostring(tbl(data).type or "")
     local rows = {}
@@ -1230,6 +1351,130 @@ local RESPONSES = {
     return okRes({ reward = reward }), sync
   end,
   ["SHOP.RESET_DYNAMIC"] = function() return okRes() end,
+  -- lottery_module.StatrWheel sends {type, count, is_free}; per-type state
+  -- is LOTTERY.pw[PRIZE_WHEEL_CONFIG[type].data_type] = {c = draws,
+  -- tc = free draws, l = lucky value, r = claimed cumulative-reward bits}.
+  ["LOTTERY.START_WHEEL"] = function(data)
+    data = tbl(data)
+    local t = math.floor(tonumber(data.type) or 0)
+    local wcfg = tbl((_ENV.GameDef.PRIZE_WHEEL_CONFIG or {})[t])
+    if not wcfg.data_type then return failRes("LOTTERY.START_WHEEL unknown type " .. t) end
+    local count = math.max(1, math.floor(tonumber(data.count) or 1))
+    local lot = moduleState("LOTTERY")
+    lot.pw = tbl(lot.pw)
+    local st = tbl(lot.pw[wcfg.data_type])
+    lot.pw[wcfg.data_type] = st
+    local sync = { LOTTERY = lot }
+    if (tonumber(data.is_free) or 0) == 1 then
+      if (tonumber(st.tc) or 0) < 1 then return failRes("LOTTERY.START_WHEEL no free draw") end
+      st.tc = st.tc - 1
+      count = 1
+    else
+      local cost = tbl(wcfg.cost)
+      local paid, short = spend(sync, { [tostring(cost.id)] = (tonumber(cost.cost) or 0) * count })
+      if not paid then return failRes("LOTTERY.START_WHEEL short of " .. tostring(short)) end
+    end
+    local ok, list = pcall(function() return _ENV.LotteryModule:GetLotteryItemList(t) end)
+    if not ok or type(list) ~= "table" or #list == 0 then
+      return failRes("LOTTERY.START_WHEEL no pool for " .. t .. " " .. tostring(list))
+    end
+    local weights, total = {}, 0
+    local rows = lotteryRows()
+    for i, str in ipairs(list) do
+      local r = rows[str]
+      weights[i] = r and r.weight or 1
+      total = total + weights[i]
+    end
+    local entries, indexes = {}, {}
+    local limit = tonumber(wcfg.lucky_limit) or 0
+    for _ = 1, count do
+      local pick
+      st.l = (tonumber(st.l) or 0) + 1
+      if limit > 0 and st.l >= limit then
+        for i, str in ipairs(list) do
+          if rows[str] and rows[str].type == "rare" then pick = i break end
+        end
+        st.l = 0
+      end
+      if not pick then
+        local roll = math.random() * total
+        for i, w in ipairs(weights) do
+          roll = roll - w
+          if roll <= 0 then pick = i break end
+        end
+        pick = pick or #list
+      end
+      indexes[#indexes + 1] = pick
+      for _, e in ipairs(rewardEntries(list[pick])) do entries[#entries + 1] = e end
+    end
+    st.c = (tonumber(st.c) or 0) + count
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] LOTTERY.START_WHEEL " .. t .. " x" .. count .. " idx=" .. ser(indexes) .. " reward=" .. ser(reward))
+    return okRes({ reward = reward, index = indexes[1], indexes = indexes, result = indexes, type = t }), sync
+  end,
+  ["LOTTERY.RESET_LOTTERY"] = function() return okRes() end,
+  ["VIP.CLAIM_MONTH_CARD_DAILY_REWARD"] = function(data)
+    local cid = tostring(tbl(data).card_id or "")
+    local vip = moduleState("VIP")
+    vip.mc = tbl(vip.mc)
+    local c = tbl(vip.mc[cid])
+    if (tonumber(c.ft) or 0) < today() or (tonumber(c.ccd) or 0) <= 0 then
+      return failRes("VIP.CLAIM_MONTH_CARD_DAILY_REWARD " .. cid .. " not claimable")
+    end
+    local ok, gift = pcall(function() return _ENV.VIPModule:GetMonthCardDailyGift(cid) end)
+    if not ok or type(gift) ~= "table" then return failRes("VIP.CLAIM_MONTH_CARD_DAILY_REWARD gift " .. tostring(gift)) end
+    local entries = {}
+    for _, g in ipairs(gift) do
+      if type(g) == "table" and g.id then entries[#entries + 1] = { id = tostring(g.id), count = tonumber(g.count) or 1, args = g.args } end
+    end
+    c.ccd = 0
+    vip.mc[cid] = c
+    local sync = { VIP = vip }
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] VIP.CLAIM_MONTH_CARD_DAILY_REWARD " .. cid .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  ["LOTTERY.CLAIM"] = function(data)
+    local t = math.floor(tonumber(tbl(data).type) or 0)
+    local wcfg = tbl((_ENV.GameDef.PRIZE_WHEEL_CONFIG or {})[t])
+    local ok, n, states = pcall(function() return _ENV.LotteryModule:GetClaimState(t) end)
+    local rcfg = _ENV.ConfigMgr:GetPrizeWheelReward(t)
+    if not ok or not wcfg.data_type or type(states) ~= "table" or type(rcfg) ~= "table" then
+      return failRes("LOTTERY.CLAIM type " .. t .. " " .. tostring(n))
+    end
+    local lot = moduleState("LOTTERY")
+    lot.pw = tbl(lot.pw)
+    local st = tbl(lot.pw[wcfg.data_type])
+    lot.pw[wcfg.data_type] = st
+    st.r = tbl(st.r)
+    local entries = {}
+    for idx, state in pairs(states) do
+      if state == 1 then
+        setBits(st.r, idx, 1, 1)
+        for _, e in ipairs(rewardEntries(rcfg["reward_" .. idx])) do entries[#entries + 1] = e end
+      end
+    end
+    if #entries == 0 then return failRes("LOTTERY.CLAIM nothing to claim") end
+    local sync = { LOTTERY = lot }
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] LOTTERY.CLAIM " .. t .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  -- purchase_module.CreateBillOnServer: offline there is no store billing,
+  -- so a real-money pack is granted at once and the bill is reported as
+  -- not created, which keeps the client from opening platform billing.
+  ["PURCHASE.REQUEST"] = function(data)
+    data = tbl(data)
+    local sku = tostring(data.sku_id or "")
+    local res, sync = RESPONSES["PURCHASE.ECO_PURCHASE"]({ sku_id = sku, __offline_paid = true })
+    if tbl(res).ret_code == protoCode("SUCCESS", 1) then
+      local reward = res.reward
+      pcall(function() _ENV.PurchaseModule:FireEvent("ON_GET_ITEMS", reward) end)
+      pcall(function() _ENV.PurchaseModule:FireEvent("PRODUCT_ITEM_UPDATE_" .. sku, res.ret_code) end)
+      print("[OFFLINE] PURCHASE.REQUEST " .. sku .. " granted offline")
+    end
+    return { ret_code = protoCode("SUCCESS", 1), pay_code = -1 }, sync
+  end,
   -- energy_module.CheckIncrease asks once the next point is due.
   ["ENERGY.INCREASE"] = function()
     local en = moduleState("ENERGY")
@@ -1245,7 +1490,8 @@ local RESPONSES = {
     local sku = tostring(data.sku_id or "")
     local cfg = _ENV.ConfigMgr:GetSKUConfig(sku)
     if type(cfg) ~= "table" then return failRes("PURCHASE.ECO_PURCHASE unknown sku " .. sku) end
-    if cfg.model ~= "video" and cfg.model ~= "free" then
+    -- Offline there is no billing, so "money" packs are granted on tap too.
+    if not data.__offline_paid and cfg.model ~= "video" and cfg.model ~= "free" and cfg.model ~= "money" then
       return failRes("PURCHASE.ECO_PURCHASE " .. sku .. " model " .. tostring(cfg.model) .. " needs real billing")
     end
     local entries = rewardEntries(seq(cfg.itemList))
@@ -1782,6 +2028,16 @@ end
 
 
 function NetAgent:Login(...)
+  -- purchase_mgr.OnPressedItem takes the in-game route (ECO_PURCHASE) when
+  -- CanBuyProductByMoney says yes; offline every real-money pack does.
+  local pm = _ENV.PurchaseModule
+  if type(pm) == "table" and not pm.__offline_free then
+    pm.CanBuyProductByMoney = function(_, sku)
+      local cfg = _ENV.ConfigMgr:GetSKUConfig(sku)
+      return type(cfg) == "table" and cfg.model == "money" and 1 or 0
+    end
+    pm.__offline_free = true
+  end
   local gd = _ENV.GameDef
   local success = 1
   if type(gd) == "table" then
