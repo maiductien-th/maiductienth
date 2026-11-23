@@ -212,6 +212,13 @@ local function initState()
     print("[OFFLINE] new day " .. tostring(lastDay) .. " -> " .. tostring(day))
   end
   st._day = day
+  -- Real-money packs are bought with the "money" (voucher) resource when
+  -- CanBuyProductByMoney allows it; offline that balance never runs out
+  -- and ECO_PURCHASE does not charge it.
+  if type(st.ECO) == "table" then
+    st.ECO.d = type(st.ECO.d) == "table" and st.ECO.d or {}
+    st.ECO.d.money = 99999999
+  end
   if MENU_BUILD then
     st._cheat = saved and type(saved._cheat) == "table" and saved._cheat or {}
     -- GMModule.IsGM (GameDef.FLAG.GM = 1) makes login_mgr open the GM panel,
@@ -1870,6 +1877,22 @@ RESPONSES["PLAYER.WEAR_SKIN"] = function(data)
   local pl = moduleState("PLAYER")
   if not skinOwned(pl, idx) then return failRes("PLAYER.WEAR_SKIN skin " .. idx .. " not owned") end
   pl.ws = ((tonumber(pl.ws) or 0) & ~255) | idx
+  -- SkinInfo.SendSkinChange (C#) reads ret_code and the skin id string from
+  -- the response, then emits the skin-change event that refreshes the view.
+  local sid = type(data) == "table" and type(data.id) == "string" and data.id or ("skin_" .. idx)
+  return okRes({ id = sid, skin_id = sid, skin = sid, index = idx }), { PLAYER = pl }
+end
+
+-- PlayerModule:RequestSkinSetNew -> PLAYER.SET_NEW {id}; PLAYER.nl is the
+-- bitset of skins whose "New!" badge was cleared (GetSkinNewState).
+RESPONSES["PLAYER.SET_NEW"] = function(data)
+  local idx = skinIndexOf(tbl(data).id)
+  if not idx or idx < 1 or idx > 255 then return failRes("PLAYER.SET_NEW bad skin " .. ser(data)) end
+  local pl = moduleState("PLAYER")
+  local nl = tbl(pl.nl)
+  local w = (idx - 1) // 32 + 1
+  nl[w] = (tonumber(nl[w]) or 0) | (1 << ((idx - 1) % 32))
+  pl.nl = nl
   return okRes(), { PLAYER = pl }
 end
 
