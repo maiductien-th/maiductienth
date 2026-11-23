@@ -1056,7 +1056,14 @@ RESPONSES = {
     if type(act.c.id) ~= "string" or act.c.id == "" then act.c.id = "act1" end
     act.c.el = math.max(tonumber(act.c.el) or 0, 5)
     act.c.erc = tbl(act.c.erc)
-    local body = { data = { id = act.c.id }, daily_next_time = now + 86400, weekly_next_time = now + 7 * 86400 }
+    -- Exchange allowances renew with the weekly period; keep the advertised
+    -- deadlines stable and clear the counts once the week has passed.
+    if (tonumber(act.c.wn) or 0) <= now then
+      if act.c.wn then act.c.erc = {} end
+      act.c.wn = now + 7 * 86400
+    end
+    if (tonumber(act.c.dn) or 0) <= now then act.c.dn = now + 86400 end
+    local body = { data = { id = act.c.id }, daily_next_time = act.c.dn, weekly_next_time = act.c.wn }
     print("[OFFLINE] QUERY.SYNC_ACTIVITY CHEST id=" .. tostring(act.c.id) .. " el=" .. tostring(act.c.el))
     return { ret_code = protoCode("SUCCESS", 1), data = ser(body) }, { ACTIVITY = act }
   end,
