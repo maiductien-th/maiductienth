@@ -261,6 +261,7 @@ local function initState()
   end
   st._day = day
   st._flweek = saved and saved._flweek
+  st._gpc = saved and saved._gpc
   if type(st.FRONTLINE) == "table" then frontlineRoll(st.FRONTLINE, st) end
   -- Real-money packs are bought with the "money" (voucher) resource when
   -- CanBuyProductByMoney allows it; offline that balance never runs out
@@ -1616,7 +1617,12 @@ RESPONSES = {
     if type(cfg) ~= "table" then return failRes("ACTIVITY.PURCHASE_GIFT unknown " .. id) end
     local idx = math.floor(tonumber(cfg.index) or 0)
     act.c.gpc = tbl(act.c.gpc)
-    local used = getBits(act.c.gpc, idx, 4)
+    -- gpc holds 4 bits per gift but limits go up to 99, so the exact count
+    -- lives in the top-level _gpc and gpc gets it capped at 15.
+    local st = NetAgent.state
+    st._gpc = tbl(st._gpc)
+    local key = tostring(act.c.id or "act1") .. ":" .. idx
+    local used = math.max(tonumber(st._gpc[key]) or 0, getBits(act.c.gpc, idx, 4))
     if used + count > (tonumber(cfg.limit) or 0) then return failRes("ACTIVITY.PURCHASE_GIFT " .. id .. " limit") end
     local sync = { ACTIVITY = act }
     local price = tbl(cfg.price)
@@ -1628,7 +1634,8 @@ RESPONSES = {
     for _ = 1, count do
       for _, e in ipairs(rewardEntries(cfg.reward)) do entries[#entries + 1] = e end
     end
-    setBits(act.c.gpc, idx, 4, used + count)
+    st._gpc[key] = used + count
+    setBits(act.c.gpc, idx, 4, math.min(15, used + count))
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] ACTIVITY.PURCHASE_GIFT " .. id .. " x" .. count)
     return okRes({ reward = reward }), sync
