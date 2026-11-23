@@ -57,7 +57,10 @@ def noop(dex, cls, name):
             idx += d
             mname = string(u32(meth_off + 8 * idx + 4))
             if mname == name and code:
-                dex[code + 16:code + 18] = struct.pack("<H", 0x000E)
+                # Every code unit becomes return-void, so each try/catch
+                # target still lands on an instruction boundary.
+                units = u32(code + 12)
+                dex[code + 16:code + 16 + 2 * units] = b"\x0e\x00" * units
                 dex[12:32] = hashlib.sha1(dex[32:]).digest()
                 dex[8:12] = struct.pack("<I", zlib.adler32(dex[12:]))
                 return bytes(dex)
