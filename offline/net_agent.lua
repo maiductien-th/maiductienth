@@ -588,15 +588,18 @@ local function grantRewards(entries, sync)
         sync.EQUIP = sync.EQUIP or moduleState("EQUIP")
         local eq = sync.EQUIP
         eq.el = type(eq.el) == "table" and eq.el or {}
+        local uids = {}
         for _ = 1, n do
           local euid = math.floor(tonumber(eq.euid) or 1)
           eq.el[tostring(euid)] = { [1] = (tid << 16) | (1 << 8) | 1 | EQUIP_NEW_MASK,
             [2] = 1, [3] = {}, [5] = 0 }
           eq.euid = euid + 1
+          uids[#uids + 1] = tostring(euid)
         end
         -- Shown as the gift_equip item (SpecEquipment) with the piece in args;
-        -- equipment names have no ItemConfig row of their own.
-        shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args) }
+        -- equipment names have no ItemConfig row of their own. uids lets a
+        -- caller show the created pieces as "myequip" entries instead.
+        shown[#shown + 1] = { id = "gift_equip", count = n, args = tostring(e.args), uids = uids, tid = tid }
       else
         print("[OFFLINE] reward UNRESOLVED equipment " .. tostring(e.args))
       end
@@ -1678,8 +1681,24 @@ RESPONSES = {
       local e = stageDrop({ chapter = math.max(1, math.ceil(((tonumber(adv.stage) or 1) - 1) / 5)) })
       if e then entries[#entries + 1] = e end
     end
-    local reward = grantRewards(entries, sync)
+    local granted = grantRewards(entries, sync)
+    -- BoxItemsPanel draws the gift_equip icon from args, then
+    -- EquipModule:IsDecomposition parses params as a packed equipment value
+    -- (template id << 16 | distribution) to get the quality.
+    local reward = {}
+    for _, r in ipairs(granted) do
+      if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
+        for _ = 1, #r.uids do
+          reward[#reward + 1] = { id = "gift_equip", count = 1, args = r.args,
+            params = tostring((r.tid << 16) | 1) }
+        end
+      else
+        reward[#reward + 1] = r
+      end
+    end
     print("[OFFLINE] OPEN_BOX " .. boxId .. " x" .. count .. " reward=" .. ser(reward))
+    -- box_module's callback treats a missing result as a failed open and
+    -- fires BOX.OPEN_RESULT(0, nil) (the "wish reset" path), so send 0.
     return okRes({ reward = reward }), sync
   end,
 
@@ -2082,6 +2101,7 @@ if MENU_BUILD then
   { "Mở vòng quay kho báu Arch", "OfflineMenu.OpenPanel('hunter/PrizeWheelPanel')" },
   { "+99999999 Điểm đổi rương sự kiện", "OfflineMenu.AddResource('ackp', 99999999)" },
   { "Mở shop trao đổi", "OfflineMenu.OpenPanel('activity/chest/ChestExchangePanel')" },
+  { "Mở rương", "OfflineMenu.OpenPanel('box/BoxPanel')" },
   { "Mở vòng quay rương", "OfflineMenu.OpenPanel('box/BoxPrizeWheelPanel')" },
   }
   function Menu.OneHitInfo() tip("One hit luôn bật trong bản menu: quái và boss chỉ có 1 máu") end
@@ -2141,9 +2161,25 @@ local function patchCustomData()
   cdm.__offline_mirror = true
 end
 
+-- BoxItemIcon asks EquipModule:IsDecomposition about each box reward. For a
+-- gift_equip entry its params parse to a nil quality and GetEquipQuality
+-- throws, leaving the reward panel empty. A freshly granted piece is never
+-- pre-marked for auto decompose, so answer false for gift_equip.
+local function patchEquipDecompose()
+  local em = _ENV.EquipModule
+  if type(em) ~= "table" or em.__offline_dec or type(em.IsDecomposition) ~= "function" then return end
+  local orig = em.IsDecomposition
+  em.IsDecomposition = function(self, item, ...)
+    if type(item) == "table" and item.id == "gift_equip" then return false end
+    return orig(self, item, ...)
+  end
+  em.__offline_dec = true
+end
+
 function NetAgent:SendRequest(group, name, data, cb)
   print("[OFFLINE] SendRequest group=" .. tostring(group) .. " name=" .. tostring(name))
   patchCustomData()
+  patchEquipDecompose()
   if MENU_BUILD then pcall(_ENV.OfflineMenu.Patch) end
   local res, _, sync = offlineResponse(group, name, data)
   local agent = self
