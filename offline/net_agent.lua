@@ -1464,7 +1464,14 @@ RESPONSES = {
       if act.c.wn then act.c.erc = {} end
       act.c.wn = now + 7 * 86400
     end
-    if (tonumber(act.c.dn) or 0) <= now then act.c.dn = now + 86400 end
+    if (tonumber(act.c.dn) or 0) <= now then
+      if act.c.dn then act.c.f = 0 end
+      act.c.dn = now + 86400
+    end
+    if (tonumber(act.c.hp) or 0) <= 0 then
+      local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id)
+      if type(chest) == "table" then act.c.hp = tonumber(chest.hp) or 0 end
+    end
     local body = { data = { id = act.c.id }, daily_next_time = act.c.dn, weekly_next_time = act.c.wn }
     print("[OFFLINE] QUERY.SYNC_ACTIVITY CHEST id=" .. tostring(act.c.id) .. " el=" .. tostring(act.c.el))
     return { ret_code = protoCode("SUCCESS", 1), data = ser(body) }, { ACTIVITY = act }
@@ -1496,6 +1503,129 @@ RESPONSES = {
     setBits(act.c.erc, idx, 4, used + count)
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] ACTIVITY.CLAIM_EXCHANGE " .. id .. " x" .. count .. " reward=" .. ser(reward))
+    return okRes({ reward = reward }), sync
+  end,
+  -- Night Spy (activity_module_chest): ACTIVITY.c keeps hp (boss hp left),
+  -- c (attacks made, also the single-player achievement record), f (free
+  -- attacks used today), apr / asr (1-bit claimed flags per single / server
+  -- achievement index), srs (1-bit per claimed stage), gpc (4-bit gift counts).
+  ["ACTIVITY.CHEST_RESET"] = function()
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    if type(chest) == "table" and (tonumber(act.c.hp) or 0) <= 0 then act.c.hp = tonumber(chest.hp) or 0 end
+    return okRes(), { ACTIVITY = act }
+  end,
+  ["ACTIVITY.ATTACK_CHEST"] = function(data)
+    data = tbl(data)
+    local count = math.max(1, math.floor(tonumber(data.count) or 1))
+    local free = data.is_free == true or tonumber(data.is_free) == 1
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    if type(chest) ~= "table" then return failRes("ACTIVITY.ATTACK_CHEST no chest") end
+    local sync = { ACTIVITY = act }
+    if free then
+      if (tonumber(act.c.f) or 0) > 0 then return failRes("ACTIVITY.ATTACK_CHEST free used") end
+      act.c.f = 1
+      count = 1
+    else
+      local price = tbl(chest.consume_res)
+      if price.id ~= nil then
+        local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 1) * count })
+        if not paid then return failRes("ACTIVITY.ATTACK_CHEST short of " .. tostring(short)) end
+      end
+    end
+    local maxHp = math.max(1, math.floor(tonumber(chest.hp) or 1))
+    local hp = math.floor(tonumber(act.c.hp) or maxHp)
+    if hp <= 0 then hp = maxHp end
+    local atk = math.max(1, math.floor(tonumber(chest.atk) or 1))
+    local chc, chd = tonumber(chest.CHC) or 0, tonumber(chest.CHD) or 1000
+    local entries = {}
+    local function add(list)
+      for _, e in ipairs(rewardEntries(list)) do entries[#entries + 1] = e end
+    end
+    for _ = 1, count do
+      local dmg = atk
+      if math.random(100) <= chc then dmg = math.floor(atk * chd / 1000) end
+      add(chest.atk_reward)
+      hp = hp - dmg
+      if hp <= 0 then
+        add(chest.kill_reward)
+        add(chest.kill_fix_reward)
+        hp = maxHp
+      end
+    end
+    act.c.hp = hp
+    act.c.c = (tonumber(act.c.c) or 0) + count
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ACTIVITY.ATTACK_CHEST x" .. count .. " hp=" .. hp .. " c=" .. act.c.c)
+    return okRes({ reward = reward, hp = hp, damage_state = 0 }), sync
+  end,
+  ["ACTIVITY.CLAIM_CHEST_ACHV_REWARD"] = function(data)
+    data = tbl(data)
+    local t, idx = math.floor(tonumber(data.type) or 1), math.floor(tonumber(data.index) or 0)
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    local rows = type(chest) == "table" and _ENV.ConfigMgr:GetConfig(chest.achievement_path)
+    rows = type(rows) == "table" and rows[t == 2 and "ACTIVITY_CHEST_SERVER" or "ACTIVITY_CHEST_SINGLE"]
+    local row = type(rows) == "table" and rows[idx]
+    if type(row) ~= "table" then return failRes("ACTIVITY.CLAIM_CHEST_ACHV_REWARD unknown " .. t .. ":" .. idx) end
+    local key = t == 2 and "asr" or "apr"
+    act.c[key] = tbl(act.c[key])
+    if getBits(act.c[key], idx, 1) == 1 then return failRes("ACTIVITY.CLAIM_CHEST_ACHV_REWARD claimed") end
+    if (tonumber(act.c.c) or 0) < (tonumber(row.aim_index) or 0) then return failRes("ACTIVITY.CLAIM_CHEST_ACHV_REWARD not reached") end
+    local sync = { ACTIVITY = act }
+    setBits(act.c[key], idx, 1, 1)
+    local reward = grantRewards(rewardEntries(row.reward), sync)
+    return okRes({ reward = reward }), sync
+  end,
+  ["ACTIVITY.CLAIM_CHEST_STAGE_REWARD"] = function(data)
+    local stage = math.floor(tonumber(tbl(data).stage) or 0)
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    if type(chest) ~= "table" then return failRes("ACTIVITY.CLAIM_CHEST_STAGE_REWARD no chest") end
+    local st = tbl(_ENV.ConfigMgr:GetConfig(chest.stage_reward_path))[stage]
+    local single = tbl(tbl(_ENV.ConfigMgr:GetConfig(chest.achievement_path)).ACTIVITY_CHEST_SINGLE)
+    local last = type(st) == "table" and single[tonumber(st.achv_end)]
+    if type(last) ~= "table" then return failRes("ACTIVITY.CLAIM_CHEST_STAGE_REWARD unknown " .. stage) end
+    act.c.srs = tbl(act.c.srs)
+    if getBits(act.c.srs, stage, 1) == 1 then return failRes("ACTIVITY.CLAIM_CHEST_STAGE_REWARD claimed") end
+    if (tonumber(act.c.c) or 0) < (tonumber(last.aim_index) or 0) then return failRes("ACTIVITY.CLAIM_CHEST_STAGE_REWARD not reached") end
+    local sync = { ACTIVITY = act }
+    setBits(act.c.srs, stage, 1, 1)
+    local reward = grantRewards(rewardEntries(st.reward), sync)
+    return okRes({ reward = reward }), sync
+  end,
+  -- Gift prices are free|n, gem|n or rmb|n; real-money gifts are free
+  -- offline like every other real-money pack.
+  ["ACTIVITY.PURCHASE_GIFT"] = function(data)
+    data = tbl(data)
+    local id, count = tostring(data.id or ""), math.max(1, math.floor(tonumber(data.count) or 1))
+    local act = moduleState("ACTIVITY")
+    act.c = tbl(act.c)
+    local chest = _ENV.ConfigMgr:GetActivityChestById(act.c.id or "act1")
+    local cfg = type(chest) == "table" and _ENV.ConfigMgr:GetChestGiftById(chest.gift_package_path, id)
+    if type(cfg) ~= "table" then return failRes("ACTIVITY.PURCHASE_GIFT unknown " .. id) end
+    local idx = math.floor(tonumber(cfg.index) or 0)
+    act.c.gpc = tbl(act.c.gpc)
+    local used = getBits(act.c.gpc, idx, 4)
+    if used + count > (tonumber(cfg.limit) or 0) then return failRes("ACTIVITY.PURCHASE_GIFT " .. id .. " limit") end
+    local sync = { ACTIVITY = act }
+    local price = tbl(cfg.price)
+    if price.id ~= nil and price.id ~= "free" and price.id ~= "rmb" then
+      local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * count })
+      if not paid then return failRes("ACTIVITY.PURCHASE_GIFT short of " .. tostring(short)) end
+    end
+    local entries = {}
+    for _ = 1, count do
+      for _, e in ipairs(rewardEntries(cfg.reward)) do entries[#entries + 1] = e end
+    end
+    setBits(act.c.gpc, idx, 4, used + count)
+    local reward = grantRewards(entries, sync)
+    print("[OFFLINE] ACTIVITY.PURCHASE_GIFT " .. id .. " x" .. count)
     return okRes({ reward = reward }), sync
   end,
   -- query_data.QueryLottery stores the whole response as
