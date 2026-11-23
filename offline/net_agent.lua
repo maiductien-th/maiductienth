@@ -2329,12 +2329,14 @@ RESPONSES = {
     -- id: gift_equip (EquipmentItem) only knows the template name, so every
     -- frame is common. drop_equip (DropEquipmentItem) Int32.TryParses params
     -- and passes it to EquipModule.ParseEquipParamValue (template id << 16 |
-    -- distribution), as battle_module builds battle drops.
+    -- distribution), as battle_module builds battle drops. Battle drops carry
+    -- no args: the item icons pass args, when set, as the param, which here
+    -- is the template name, fails TryParse and shows the "?" placeholder.
     local reward = {}
     for _, r in ipairs(granted) do
       if r.id == "gift_equip" and type(r.uids) == "table" and r.tid then
         for _ = 1, #r.uids do
-          reward[#reward + 1] = { id = "drop_equip", count = 1, quantity = 1, args = r.args,
+          reward[#reward + 1] = { id = "drop_equip", count = 1, quantity = 1,
             params = tostring((r.tid << 16) | (r.dist or 1)) }
         end
       else
