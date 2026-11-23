@@ -963,9 +963,25 @@ local function techCost(id, kind)
 end
 
 -- hunter_reward_pool: {id, reward, type = common|rare, weight}.
+-- The Arch wheel pool ships only as the CSV table in assets/config.ab;
+-- ConfigMgr has no zlib copy, so its rows are embedded here.
+local HUNTER_REWARD_POOL = {
+  { id = "energy", reward = "energy|5", type = "common", weight = 200 },
+  { id = "stone", reward = "stone|5", type = "common", weight = 200 },
+  { id = "coin", reward = "coin|2000", type = "common", weight = 200 },
+  { id = "hb", reward = "hb|6", type = "common", weight = 200 },
+  { id = "gem", reward = "gem|10", type = "common", weight = 100 },
+  { id = "key_common", reward = "key_common|1", type = "common", weight = 100 },
+  { id = "capsule", reward = "capsule|1", type = "common", weight = 100 },
+  { id = "key_adv", reward = "key_adv|1", type = "common", weight = 40 },
+  { id = "capsule_5", reward = "capsule|5", type = "rare", weight = 20 },
+  { id = "key_adv_3", reward = "key_adv|3", type = "rare", weight = 10 },
+}
 local function lotteryRows()
   local rows = {}
-  for _, r in pairs(_ENV.ConfigMgr:GetConfig("hunter_reward_pool") or {}) do
+  local cfg = _ENV.ConfigMgr:GetConfig("hunter_reward_pool")
+  if type(cfg) ~= "table" or next(cfg) == nil then cfg = HUNTER_REWARD_POOL end
+  for _, r in pairs(cfg) do
     if type(r) == "table" and r.reward ~= nil then
       local str = itemStr(r.reward)
       rows[str] = { type = r.type, weight = tonumber(r.weight) or 1, id = r.id }
@@ -987,7 +1003,8 @@ local function lotteryPool()
   end
   return common, rare
 end
-local RESPONSES = {
+local RESPONSES
+RESPONSES = {
   -- CHECK_SERVER_CONFIG response { result 0 : *DictionaryStr }: no overrides.
   ["BASE.CHECK_SERVER_CONFIG"] = function(data)
     return { ret_code = protoCode("SUCCESS", 1), result = {} }
@@ -1387,6 +1404,11 @@ local RESPONSES = {
     data = tbl(data)
     local t = math.floor(tonumber(data.type) or 0)
     local wcfg = tbl((_ENV.GameDef.PRIZE_WHEEL_CONFIG or {})[t])
+    local hunter = t == _ENV.GameDef.LOTTERY.hunter_normal or t == _ENV.GameDef.LOTTERY.hunter_special
+    if hunter then
+      -- Arch (hunter) wheel: hunter_module.GetWheelCost = hb|HUNTER_WHEEL_COST_HB[type].
+      wcfg = { data_type = "h" .. t, cost = { id = "hb", cost = tonumber((_ENV.GameDef.HUNTER_WHEEL_COST_HB or {})[t]) or 0 } }
+    end
     if not wcfg.data_type then return failRes("LOTTERY.START_WHEEL unknown type " .. t) end
     local count = math.max(1, math.floor(tonumber(data.count) or 1))
     local lot = moduleState("LOTTERY")
@@ -1403,7 +1425,10 @@ local RESPONSES = {
       local paid, short = spend(sync, { [tostring(cost.id)] = (tonumber(cost.cost) or 0) * count })
       if not paid then return failRes("LOTTERY.START_WHEEL short of " .. tostring(short)) end
     end
-    local ok, list = pcall(function() return _ENV.LotteryModule:GetLotteryItemList(t) end)
+    local ok, list = pcall(function()
+      if hunter then return _ENV.HunterModule:GetHunterItemList(t) end
+      return _ENV.LotteryModule:GetLotteryItemList(t)
+    end)
     if not ok or type(list) ~= "table" or #list == 0 then
       return failRes("LOTTERY.START_WHEEL no pool for " .. t .. " " .. tostring(list))
     end
@@ -1439,9 +1464,18 @@ local RESPONSES = {
     st.c = (tonumber(st.c) or 0) + count
     local reward = grantRewards(entries, sync)
     print("[OFFLINE] LOTTERY.START_WHEEL " .. t .. " x" .. count .. " idx=" .. ser(indexes) .. " reward=" .. ser(reward))
-    return okRes({ reward = reward, index = indexes[1], indexes = indexes, result = indexes, type = t }), sync
+    return okRes({ reward = reward, index = indexes[1], indexes = indexes, result = indexes, type = t,
+      reward_id = list[indexes[1]], id = list[indexes[1]] }), sync
   end,
   ["LOTTERY.RESET_LOTTERY"] = function() return okRes() end,
+  -- PrizeWheelPanel (Arch wheel) spins through SendRequest4CS HUNTER.START_WHEEL
+  -- with the hunter pool type; draws share the LOTTERY wheel logic.
+  ["HUNTER.START_WHEEL"] = function(data)
+    data = tbl(data)
+    print("[OFFLINE] HUNTER.START_WHEEL args=" .. ser(data))
+    local t = tonumber(data.type) or tonumber(data[1]) or _ENV.GameDef.LOTTERY.hunter_normal
+    return RESPONSES["LOTTERY.START_WHEEL"]({ type = t, count = tonumber(data.count) or 1, is_free = 0 })
+  end,
   ["VIP.CLAIM_MONTH_CARD_DAILY_REWARD"] = function(data)
     local cid = tostring(tbl(data).card_id or "")
     local vip = moduleState("VIP")
@@ -1977,7 +2011,7 @@ if MENU_BUILD then
   -- reach the C# battle, which keeps its own copy.
   local NAMES = {
     coin = "Vàng", rmb = "Zeno", stone = "Quặng lục lam", gem = "Đá quý",
-    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP",
+    core_weapon = "Lõi vũ khí", capsule = "Viên nang XP", hb = "Xu kho báu Arch",
   }
   local PRESET = {
     { "+99999999 Vàng", "OfflineMenu.AddResource('coin', 99999999)" },
@@ -1988,6 +2022,7 @@ if MENU_BUILD then
     { "+99999999 Viên nang XP (lên cấp)", "OfflineMenu.AddResource('capsule', 99999999)" },
     { "Mở khóa tất cả skin", "OfflineMenu.UnlockSkins()" },
     { "One hit: luôn bật (1 đòn chết quái)", "OfflineMenu.OneHitInfo()" },
+  { "+99999999 Xu kho báu Arch", "OfflineMenu.AddResource('hb', 99999999)" },
   { "Mở vòng quay kho báu Arch", "OfflineMenu.OpenPanel('hunter/PrizeWheelPanel')" },
   { "Mở vòng quay rương", "OfflineMenu.OpenPanel('box/BoxPrizeWheelPanel')" },
   }
