@@ -210,7 +210,9 @@ local function frontlineRoll(fl)
   local fd = tonumber(fl.fd) or 0
   fl.fd = (fd & ~(0x1F << 8)) | (wday << 8) | (round << 11)
   -- The week is named by its Monday so it never splits at New Year.
-  local week = os.date("%Y%m%d", t - ((wday + 5) % 7) * 86400)
+  local monday = os.date("*t", t)
+  monday.day, monday.hour = monday.day - (wday + 5) % 7, 12
+  local week = os.date("%Y%m%d", os.time(monday))
   if fl._week ~= week then
     -- Profiles saved before the marker existed keep their scores.
     if fl._week ~= nil then fl.ds = {} end
