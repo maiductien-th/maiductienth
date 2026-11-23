@@ -1227,8 +1227,18 @@ local HUNTER_REWARD_POOL = {
   { id = "capsule_5", reward = "capsule|5", type = "rare", weight = 20 },
   { id = "key_adv_3", reward = "key_adv|3", type = "rare", weight = 10 },
 }
-local function lotteryRows()
+-- The wish-points wheel (Rewinding Treasure, PRIZE_WHEEL_CONFIG[3]) draws
+-- 12 slots, rares at 1/5/6/11 (lottery_module.GetLotteryItemList); its pool
+-- is server-side, and hunter_reward_pool has only 2 rares.
+local WISH_WHEEL_RARES = {
+  ["cell_m|5"] = { type = "rare", weight = 10 },
+  ["random_core|5"] = { type = "rare", weight = 10 },
+}
+local function lotteryRows(t)
   local rows = {}
+  if t == tonumber((_ENV.GameDef.LOTTERY or {}).wish_points) then
+    for str, r in pairs(WISH_WHEEL_RARES) do rows[str] = r end
+  end
   local cfg = _ENV.ConfigMgr:GetConfig("hunter_reward_pool")
   if type(cfg) ~= "table" or next(cfg) == nil then cfg = HUNTER_REWARD_POOL end
   for _, r in pairs(cfg) do
@@ -1239,10 +1249,10 @@ local function lotteryRows()
   end
   return rows
 end
-local function lotteryPool()
+local function lotteryPool(t)
   local common, rare = {}, {}
   local ids = {}
-  for str, r in pairs(lotteryRows()) do ids[#ids + 1] = { str = str, r = r } end
+  for str, r in pairs(lotteryRows(t)) do ids[#ids + 1] = { str = str, r = r } end
   table.sort(ids, function(a, b) return a.r.weight > b.r.weight or (a.r.weight == b.r.weight and a.str < b.str) end)
   for _, x in ipairs(ids) do
     if x.r.type == "rare" then
@@ -1430,7 +1440,7 @@ RESPONSES = {
   ["POTENTIAL.INCREASE_TICKET"] = function() return okRes() end,
   ["QUERY.LOTTERY"] = function(data)
     local t = math.floor(tonumber(tbl(data).type) or 0)
-    local common, rare = lotteryPool()
+    local common, rare = lotteryPool(t)
     local now = 0
     pcall(function() now = tonumber(_ENV.TimeMgr:GetCurrentServerTime()) or 0 end)
     print("[OFFLINE] QUERY.LOTTERY " .. t .. " common=" .. #common .. " rare=" .. #rare)
@@ -1929,9 +1939,13 @@ RESPONSES = {
     local st = tbl(lot.pw[wcfg.data_type])
     lot.pw[wcfg.data_type] = st
     local sync = { LOTTERY = lot }
-    if (tonumber(data.is_free) or 0) == 1 then
-      if (tonumber(st.tc) or 0) < 1 then return failRes("LOTTERY.START_WHEEL no free draw") end
-      st.tc = st.tc - 1
+    -- tc counts today's free draws used: StatrWheelFree only sends while
+    -- GetFreeDrawsCount < 1 and GetDailyTimer shows no timer at tc <= 0.
+    local today = os.date("%Y%m%d")
+    if st.fd ~= today then st.fd, st.tc = today, 0 end
+    if data.is_free == true or tonumber(data.is_free) == 1 then
+      if (tonumber(st.tc) or 0) >= 1 then return failRes("LOTTERY.START_WHEEL no free draw") end
+      st.tc = 1
       count = 1
     else
       local cost = tbl(wcfg.cost)
@@ -1961,7 +1975,7 @@ RESPONSES = {
       return failRes("LOTTERY.START_WHEEL no pool for " .. t .. " " .. tostring(list))
     end
     local weights, total = {}, 0
-    local rows = lotteryRows()
+    local rows = lotteryRows(t)
     for i, str in ipairs(list) do
       local r = rows[str]
       weights[i] = r and r.weight or 1
