@@ -1605,8 +1605,7 @@ RESPONSES = {
     local reward = grantRewards(rewardEntries(st.reward), sync)
     return okRes({ reward = reward }), sync
   end,
-  -- Gift prices are free|n, gem|n or rmb|n; real-money gifts are free
-  -- offline like every other real-money pack.
+  -- Gift prices are free|n, gem|n or rmb|n (rmb is the Zeno item).
   ["ACTIVITY.PURCHASE_GIFT"] = function(data)
     data = tbl(data)
     local id, count = tostring(data.id or ""), math.max(1, math.floor(tonumber(data.count) or 1))
@@ -1621,7 +1620,7 @@ RESPONSES = {
     if used + count > (tonumber(cfg.limit) or 0) then return failRes("ACTIVITY.PURCHASE_GIFT " .. id .. " limit") end
     local sync = { ACTIVITY = act }
     local price = tbl(cfg.price)
-    if price.id ~= nil and price.id ~= "free" and price.id ~= "rmb" then
+    if price.id ~= nil and price.id ~= "free" then
       local paid, short = spend(sync, { [tostring(price.id)] = (tonumber(price.count) or 0) * count })
       if not paid then return failRes("ACTIVITY.PURCHASE_GIFT short of " .. tostring(short)) end
     end
