@@ -1,22 +1,29 @@
-## Các lỗi đã tìm thấy và sửa từ bản `duan1`
+## Các lỗi đã sửa trong bản Fix v2 (sửa lỗi văng game ở `duan1-fix1`)
 
-1. **Lỗi hỏng mã hóa XXTEA ở `assets/assets/main/index.jsc` (nguyên nhân chính khiến game treo màn hình splash, không vào được):**
-   - Hàm `xxtea_decrypt` trong `libcocos2djs.so` bắt buộc 4 byte cuối (trailer) sau giải mã phải chứa độ dài dữ liệu gốc (`enc_len - 7 <= trailer <= enc_len - 4`).
-   - File `assets/assets/main/index.jsc` ở bản `duan1` bị mã hóa thiếu 4 byte length trailer (`trailer = 357` trong khi `enc_len = 25728`), khiến `xxtea_decrypt` trả về `NULL` và Cocos2d-JS không load được bundle `main`.
-   - **Đã sửa:** Mã hóa lại `assets/assets/main/index.jsc` đúng chuẩn XXTEA có length trailer của `libcocos2djs.so` và xác minh giải mã toàn bộ 112/112 file `.jsc`.
+1. **Sửa lỗi văng game (`NullPointerException` trên UI thread) khi vào `MainView` và trong lúc chơi (`classes7.dex` + `offline-server.js`):**
+   - **Nguyên nhân gốc (tìm thấy qua kiểm thử trực tiếp trên giả lập Android 12 + phân tích `classes7.dex`):** Dù `YqSdkMgr.checkIsSupportSDK()` trả về `false`, plugin `com.xmyanqu.dq.SDK37User` vẫn được nạp trong khi `SDK37Tools.initSDK()` đã bị bỏ qua, khiến `SDK37Tools.riverSDKApi == null`. Khi `MainView` mở lên (`MainView.afterInitView`), game gọi `U8SDKMgr.inst.sdk.getGameCenter()` -> `YqSdkMgr.sqSDKGetButtonList()` -> `SDK37Tools.sqSDKGetButtonList()` và truy cập `riverSDKApi` đang `null` trên luồng giao diện chính, gây văng game ngay lập tức. Lỗi tương tự cũng xảy ra ở `queryProducts`, `setLanguage`, `videoAd`, `submitExtraData`, `pay`, `performFeature`, `isFeatureSupported`, v.v.
+   - **Đã sửa:**
+     - Vô hiệu hóa toàn bộ 45+ hàm ủy quyền `YqPlatform` trong `YqSdkMgr.smali` (`classes7.dex`) và tắt `BuglyExt` (`initBugly`, `postException`, `putUserData`).
+     - Chặn toàn bộ cầu gọi JNI SDK/quảng cáo ở tầng JS (`android-tool`: `yqSdkInvoke`, `jsb37Invoke`, `jsbAdInvoke`, `initCnAd`; `android-sdk`: 35+ phương thức bao gồm `getGameCenter`, `videoAd`, `queryProducts`, `setLanguage`, `submitExtraData`, `pay`,...; và `SubmitEventMgr`).
 
-2. **Lỗi SDK 37Games / RiverSDK chặn khởi động & đăng nhập (`classes7.dex`):**
-   - `YqSdkMgr.checkIsSupportSDK()` trước đó vẫn trả về `true`, khiến `GameActivity` gọi khởi tạo SDK 37Games/RiverSDK và `GameConfig.isU8SDK = true` (bắt buộc đăng nhập online).
-   - **Đã sửa:** Patch `YqSdkMgr` trong `classes7.dex` (`checkIsSupportSDK() -> false`, `sdkInitFinished() -> "true"`, vô hiệu hóa `initAd` / `loadVideo`) và bỏ qua bước chờ SDK ở `assets/main.js`.
+2. **Sửa lỗi treo màn hình splash Funtap che mất màn đăng nhập (`GameLoginView`):**
+   - **Nguyên nhân:** `GameLoginView.getIsTiShen()` gửi `POST /server/list` trước khi `isViewValid == true`. Do server offline phản hồi quá nhanh (15ms), `isOnReqTsState` bị kẹt `true` mãi mãi nên `doHideSplash()` không chạy.
+   - **Đã sửa:** Vá `GameLoginView.getIsTiShen` và `onUILoadedComplete` luôn xóa cờ `isOnReqTsState` và gọi `doHideSplash()`.
 
-3. **Lỗi không có server offline cho `http://127.0.0.1/` và WebSocket/Protobuf:**
-   - Bản `duan1` chỉ trỏ `PackageInfo` về `http://127.0.0.1/` nhưng không có backend xử lý `server/list`, `player/testLogin`, `player/createRole`, `packageUpdateVN` và WebSocket Protobuf.
-   - **Đã sửa:** Tích hợp `assets/offline-server.js` chạy trực tiếp trong game:
-     - Xử lý đầy đủ HTTP (`/server/list`, `/player/testLogin`, `/player/createRole`, bỏ qua check update & event tracking).
-     - Giả lập WebSocket & Protobuf đúng schema gốc (`S_PLAYER_LOGIN` + 16 gói đồng bộ khởi đầu + `LoginOverMsg`).
-     - Hỗ trợ vòng chơi offline cơ bản: chọn nhân vật, chặt cây nhận trang bị, trang bị / tách trang bị lấy tu vi & linh thạch, nâng cấp cây tiên, đột phá cảnh giới, vượt ải (có mô phỏng trận đánh `BattleRecordMsg`), nhận thưởng nhiệm vụ chính tuyến và tự lưu tiến trình vào `localStorage`.
+3. **Tắt popup giả "mạng chậm / khởi động lại" khi đang nạp tài nguyên (`GameLoadingView`):**
+   - Vô hiệu hóa bộ đếm `GameLoadingView.checkLoadStatus()` (trước đó bật `CommonConfirmView` sau 10 giây chờ nạp DB/Protobuf).
 
-## Thông tin cài đặt
-- **File:** `HanhDaoKy-3.8.00-offline-fix1.apk` (arm64-v8a, Android 6.0+, ký v1+v2+v3, đã `zipalign -p 4`)
-- **Lưu ý:** Gỡ cài đặt bản `duan1` cũ trước khi cài bản này (do khác chữ ký APK).
-- *(Đã kiểm thử tự động toàn bộ luồng HTTP + Protobuf bằng Node.js và xác minh cấu trúc/chữ ký/XXTEA APK trên Linux, chưa test trực tiếp trên máy Android vật lý.)*
+4. **Tối ưu tốc độ nạp 120 file `.proto` (`ProtobufMgr`):**
+   - Dùng chung một `ProtoBuf.Builder` theo khóa `"./" + protoName` để không phân tích lại các file `.proto` dùng chung (`Common`, `Battle`, `WatchPlayer`,...) 120 lần (tăng tốc 5x–64x, xác minh xây dựng đủ `1706/1706` message classes không lỗi).
+
+5. **Kế thừa đầy đủ các bản sửa từ `duan1-fix1`:**
+   - Sửa 4 byte XXTEA length trailer trong `assets/assets/main/index.jsc` (xác minh giải mã 112/112 file `.jsc`).
+   - Tích hợp `assets/offline-server.js` xử lý HTTP (`/server/list`, `/player/testLogin`, `/player/createRole`) và WebSocket/Protobuf offline (tạo nhân vật, chặt cây, trang bị/tách trang bị, nâng cấp cây, đột phá cảnh giới, vượt ải, nhận thưởng nhiệm vụ, tự lưu tiến trình trong `localStorage`).
+
+## Kết quả kiểm thử
+- **Node.js E2E:** PASS toàn bộ luồng HTTP + 16 gói đồng bộ đăng nhập Protobuf + chặt cây + trang bị + tách + đột phá + nâng cây + vượt ải (`MainAction` decode) + nhiệm vụ + `localStorage`.
+- **Giả lập Android 12 (`arm64-v8a`):** Đã xác minh trực tiếp cài đặt, khởi động V8, ẩn splash sạch, hiện `S1 - Hành Đạo Offline`, đăng nhập, mở màn tạo nhân vật (`CreatRoleView`), tạo nhân vật và nạp 120/120 Protobuf + toàn bộ DB không crash.
+
+## Hướng dẫn cài đặt
+- **File:** `HanhDaoKy-3.8.00-offline-fix2.apk` (arm64-v8a, Android 6.0+, ký v1+v2+v3, đã `zipalign -p 4`)
+- **Lưu ý quan trọng:** **Gỡ cài đặt bản `duan1` hoặc `duan1-fix1` cũ trước** khi cài bản `fix2` này (do khóa ký APK mới).

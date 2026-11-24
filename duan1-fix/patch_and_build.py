@@ -176,33 +176,97 @@ def main():
 
     yq_smali = os.path.join(smali_dir, "org", "cocos2dx", "javascript", "plugin", "YqSdkMgr.smali")
     s = open(yq_smali, "r", encoding="utf-8").read()
+
+    # Neutralize ALL YqPlatform-delegating methods so uninitialized SDK37Tools.riverSDKApi can NEVER throw NPE
+    void_0arg_methods = [
+        ".method public static bindPhone()V",
+        ".method public static channelInfo()V",
+        ".method public static destroy()V",
+        ".method public static faq()V",
+        ".method public static getFeedbackState()V",
+        ".method public static initAd()V",
+        ".method public static isVideoAvailable()V",
+        ".method public static loadVideo()V",
+        ".method public static login()V",
+        ".method public static openAgreement()V",
+        ".method public static openAppStore()V",
+        ".method public static openPersonalizedAdSettingsDialog()V",
+        ".method public static openRegister()V",
+        ".method public static queryAntiAddiction()V",
+        ".method public static quitGame()V",
+        ".method public static realName()V",
+        ".method public static showAccountCenter()V",
+        ".method public static showAd()V",
+        ".method public static showAgeAppropriate()V",
+        ".method public static showAgeIcon()V",
+        ".method public static showBBS()V",
+        ".method public static showGift()V",
+        ".method public static showPayGuid()V",
+        ".method public static sqSDKGetButtonList()V",
+        ".method public static sqSDKPresentNaverSDKMainView()V",
+        ".method public static startLoginView()V",
+        ".method public static switchAccount()V",
+        ".method public static validateIntegration()V",
+    ]
+    for sig in void_0arg_methods:
+        s = replace_smali_method(s, sig, f"{sig}\n    .registers 0\n\n    return-void\n.end method")
+
+    void_1arg_methods = [
+        ".method public static achievement(Ljava/lang/String;)V",
+        ".method public static bindLogin(Ljava/lang/String;)V",
+        ".method public static initAdData(Ljava/lang/String;)V",
+        ".method public static initV2Ad(Ljava/lang/String;)V",
+        ".method public static openLink(Ljava/lang/String;)V",
+        ".method public static performFeature(Ljava/lang/String;)V",
+        ".method public static sdkVip(Ljava/lang/String;)V",
+        ".method public static setAdUserId(Ljava/lang/String;)V",
+        ".method public static setDynamicUserId(Ljava/lang/String;)V",
+        ".method public static setLanguage(Ljava/lang/String;)V",
+        ".method public static setPersonalizedAd(Z)V",
+        ".method public static share(Ljava/lang/String;)V",
+        ".method public static showAd(Ljava/lang/String;)V",
+        ".method public static showHuaweiAd(Ljava/lang/String;)V",
+        ".method public static showV2Ad(Ljava/lang/String;)V",
+        ".method public static submitExtraData(Ljava/lang/String;)V",
+    ]
+    for sig in void_1arg_methods:
+        s = replace_smali_method(s, sig, f"{sig}\n    .registers 1\n\n    return-void\n.end method")
+
     s = replace_smali_method(
         s,
+        ".method public static queryProducts(Ljava/lang/String;Ljava/lang/String;)V",
+        """.method public static queryProducts(Ljava/lang/String;Ljava/lang/String;)V
+    .registers 2
+
+    return-void
+.end method""",
+    )
+
+    bool_or_int_false_0arg = [
         ".method public static checkIsSupportSDK()Z",
-        """.method public static checkIsSupportSDK()Z
+        ".method public static getPersonalizedAd()Z",
+        ".method public static hashLogin()Z",
+    ]
+    for sig in bool_or_int_false_0arg:
+        s = replace_smali_method(s, sig, f"{sig}\n    .registers 1\n\n    const/4 v0, 0x0\n\n    return v0\n.end method")
+
+    bool_or_int_false_1arg = [
+        ".method public static isFeatureSupported(I)Z",
+        ".method public static isFeatureSupported(Ljava/lang/String;)Z",
+        ".method public static isSupportMethod(Ljava/lang/String;)I",
+    ]
+    for sig in bool_or_int_false_1arg:
+        s = replace_smali_method(s, sig, f"{sig}\n    .registers 2\n\n    const/4 v0, 0x0\n\n    return v0\n.end method")
+
+    s = replace_smali_method(
+        s,
+        ".method public static getAdPlatform()Ljava/lang/String;",
+        """.method public static getAdPlatform()Ljava/lang/String;
     .registers 1
 
-    const/4 v0, 0x0
+    const-string v0, ""
 
-    return v0
-.end method""",
-    )
-    s = replace_smali_method(
-        s,
-        ".method public static initAd()V",
-        """.method public static initAd()V
-    .registers 0
-
-    return-void
-.end method""",
-    )
-    s = replace_smali_method(
-        s,
-        ".method public static loadVideo()V",
-        """.method public static loadVideo()V
-    .registers 0
-
-    return-void
+    return-object v0
 .end method""",
     )
     s = replace_smali_method(
@@ -223,6 +287,19 @@ def main():
 .end method""",
     )
     open(yq_smali, "w", encoding="utf-8").write(s)
+
+    # Also disable online Bugly crash uploader init/post in offline mode
+    bugly_smali = os.path.join(smali_dir, "org", "cocos2dx", "javascript", "bugly", "BuglyExt.smali")
+    if os.path.isfile(bugly_smali):
+        bs = open(bugly_smali, "r", encoding="utf-8").read()
+        for bsig in [
+            ".method public static initBugly(Ljava/lang/String;)V",
+            ".method public static postException(Ljava/lang/String;)V",
+            ".method public static putUserData(Ljava/lang/String;)V",
+        ]:
+            if bsig in bs:
+                bs = replace_smali_method(bs, bsig, f"{bsig}\n    .registers 1\n\n    return-void\n.end method")
+        open(bugly_smali, "w", encoding="utf-8").write(bs)
 
     dex7_out = os.path.join(stage, "classes7.dex")
     run(["java", "-cp", smali_cp, "org.jf.smali.Main", "assemble", smali_dir, "-o", dex7_out])

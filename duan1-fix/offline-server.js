@@ -1388,11 +1388,38 @@
             };
         }
 
-        // 3. android-sdk: prevent native ad/SDK calls from crashing or stalling
+        // 3. android-tool: block ALL JNI calls to 37Games / RiverSDK / AdVideoMgr at the bridge layer
+        var atoolMod = safeRequire("android-tool");
+        if (atoolMod && atoolMod.androidTool) {
+            var defaultBySig = function (sig) {
+                var s = String(sig || "()V");
+                if (s.slice(-1) === "Z") return false;
+                if (s.slice(-1) === "I" || s.slice(-1) === "F" || s.slice(-1) === "J" || s.slice(-1) === "D") return 0;
+                if (s.indexOf(")Ljava/lang/String;") >= 0) return "";
+                return undefined;
+            };
+            atoolMod.androidTool.prototype.initCnAd = function () {};
+            atoolMod.androidTool.prototype.yqSdkInvoke = function (method, sig) {
+                console.log("[Offline] Blocked YqSdkMgr." + method);
+                return defaultBySig(sig);
+            };
+            atoolMod.androidTool.prototype.jsb37Invoke = function (method, sig) {
+                console.log("[Offline] Blocked SDK37Tools." + method);
+                return defaultBySig(sig);
+            };
+            atoolMod.androidTool.prototype.jsbAdInvoke = function (method, sig) {
+                console.log("[Offline] Blocked AdVideoMgr." + method);
+                return defaultBySig(sig);
+            };
+        }
+
+        // 4. android-sdk: prevent ALL native ad/37SDK calls from crashing or stalling
         var asdkMod = safeRequire("android-sdk");
         if (asdkMod && asdkMod.androidSdk) {
             var proto = asdkMod.androidSdk.prototype;
             proto.isSupportSdk = function () { return false; };
+            proto.isFeatureSupported = function () { return false; };
+            proto.checkMinorRefundFeatureSupported = function () { return false; };
             proto.loadVideo = function () {};
             proto.initAd = function () {};
             proto.submitEvent = function () {};
@@ -1406,12 +1433,43 @@
             proto.clickCreateRoleBtn = function () {};
             proto.isRole = function () {};
             proto.clearSdkGameCenter = function () {};
+            proto.getGameCenter = function () {};
+            proto.setLanguage = function () {};
+            proto.setPersonalizedAd = function () {};
+            proto.performFeature = function () {};
+            proto.pay = function () {};
+            proto.switchAccount = function () {};
+            proto.login = function (cb) { if (typeof cb === "function") setTimeout(function () { cb(true); }, 20); };
+            proto.openLink = function () {};
+            proto.openLinkFB = function () {};
+            proto.faq = function () {};
+            proto.showAccountCenter = function () {};
+            proto.showBBS = function () {};
+            proto.showGift = function () {};
+            proto.openAgreement = function () {};
+            proto.openRegister = function () {};
+            proto.exit = function () {};
+            proto.share = function () {};
+            proto.queryProducts = function (products, type, cb) {
+                if (typeof cb === "function") setTimeout(function () { cb([]); }, 20);
+            };
+            proto.videoAd = function (cb) {
+                if (typeof cb === "function") setTimeout(function () { cb(true); }, 50);
+            };
             proto.showVideo = function (cb) {
                 if (typeof cb === "function") setTimeout(function () { cb(true); }, 50);
             };
         }
 
-        // 4. GameUpdateView: skip remote update checks completely
+        // 4b. SubmitEventMgr: disable SDK event submission
+        var semMod = safeRequire("SubmitEventMgr");
+        if (semMod && semMod.SubmitEventMgr) {
+            semMod.SubmitEventMgr.commonSubmit = function () {};
+            semMod.SubmitEventMgr.detailSubmit = function () {};
+            semMod.SubmitEventMgr.adEventReport = function () {};
+        }
+
+        // 5. GameUpdateView: skip remote update checks completely
         var guvMod = safeRequire("GameUpdateView");
         if (guvMod && guvMod.GameUpdateView) {
             guvMod.GameUpdateView.prototype.checkVersion = function (cb) {
@@ -1419,9 +1477,23 @@
             };
         }
 
-        // 5. GameLoginView: prefill offline UID so user can tap Enter Game directly
+        // 6. GameLoginView: fix splash race condition (getIsTiShen) & prefill offline UID
         var glvMod = safeRequire("GameLoginView");
         if (glvMod && glvMod.GameLoginView) {
+            glvMod.GameLoginView.prototype.getIsTiShen = function () {
+                this.isOnReqTsState = false;
+                if (this.isWaitHideSplash && typeof this.doHideSplash === "function") {
+                    this.doHideSplash();
+                }
+            };
+            var origLoginUILoaded = glvMod.GameLoginView.prototype.onUILoadedComplete;
+            glvMod.GameLoginView.prototype.onUILoadedComplete = function () {
+                this.isOnReqTsState = false;
+                if (origLoginUILoaded) origLoginUILoaded.call(this);
+                try {
+                    if (typeof this.doHideSplash === "function") this.doHideSplash();
+                } catch (e) {}
+            };
             var origChangeState = glvMod.GameLoginView.prototype.changeStateToLogin;
             glvMod.GameLoginView.prototype.changeStateToLogin = function () {
                 if (origChangeState) origChangeState.call(this);
@@ -1438,7 +1510,63 @@
             };
         }
 
-        // 6. Disable EventTracking HTTP spam
+        // 6b. GameLoadingView: disable fake 10s "slow network" timeout popup in offline mode
+        var gloadMod = safeRequire("GameLoadingView");
+        if (gloadMod && gloadMod.GameLoadingView) {
+            gloadMod.GameLoadingView.prototype.checkLoadStatus = function () {};
+        }
+
+        // 6c. ProtobufMgr: share one Builder across all 120 .proto files to avoid re-parsing transitive imports 120x
+        var pbMod = safeRequire("ProtobufMgr");
+        if (pbMod && pbMod.ProtobufMgr && pbMod.ProtobufMgr.prototype && typeof pbMod.ProtobufMgr.prototype.loadParseAllCmdMsg === "function") {
+            var sharedBuilders = Object.create(null);
+            var origLoadParse = pbMod.ProtobufMgr.prototype.loadParseAllCmdMsg;
+            pbMod.ProtobufMgr.prototype.loadParseAllCmdMsg = function (buf, protoName, rootPath) {
+                if (typeof window !== "undefined" && window.ProtoBuf && typeof window.ProtoBuf.protoFromString === "function") {
+                    var origProtoFromString = window.ProtoBuf.protoFromString;
+                    var rootKey = String(rootPath || "./protobuf");
+                    if (!sharedBuilders[rootKey]) {
+                        sharedBuilders[rootKey] = window.ProtoBuf.newBuilder();
+                    }
+                    var b = sharedBuilders[rootKey];
+                    var fileKey = "./" + (protoName || "BasicMsg");
+                    window.ProtoBuf.protoFromString = function (src, builder, filename) {
+                        try {
+                            return origProtoFromString.call(window.ProtoBuf, src, builder || b, fileKey);
+                        } catch (e) {
+                            console.warn("[Offline] sharedBuilder fallback for " + fileKey + ": " + e);
+                            return origProtoFromString.call(window.ProtoBuf, src, builder, filename);
+                        }
+                    };
+                    try {
+                        return origLoadParse.call(this, buf, protoName, rootPath);
+                    } finally {
+                        window.ProtoBuf.protoFromString = origProtoFromString;
+                    }
+                }
+                return origLoadParse.call(this, buf, protoName, rootPath);
+            };
+        }
+
+        // 6d. MainView: diagnostic marker & guard so we confirm MainView entry cleanly
+        var mvMod = safeRequire("MainView");
+        if (mvMod && mvMod.MainView && mvMod.MainView.prototype) {
+            var origAfterInit = mvMod.MainView.prototype.afterInitView;
+            if (origAfterInit) {
+                mvMod.MainView.prototype.afterInitView = function () {
+                    console.log("[Offline] Entering MainView.afterInitView...");
+                    try {
+                        var res = origAfterInit.call(this);
+                        console.log("[Offline] MainView.afterInitView SUCCESS!");
+                        return res;
+                    } catch (e) {
+                        console.error("[Offline] MainView.afterInitView error: " + e + "\n" + (e && e.stack));
+                    }
+                };
+            }
+        }
+
+        // 7. Disable EventTracking HTTP spam
         var etMod = safeRequire("EventTracking");
         if (etMod && etMod.EventTracking) {
             etMod.EventTracking.ReportEvent = function () {};
@@ -1450,7 +1578,7 @@
             mpetMod.MainPackageEventTracking.HttpPost = function (u, d, cb) { if (cb) cb(); };
         }
 
-        // 7. Hook HttpMgr
+        // 8. Hook HttpMgr
         var httpMod = safeRequire("HttpMgr");
         if (httpMod && httpMod.HttpMgr) {
             var HttpMgr = httpMod.HttpMgr;
@@ -1478,7 +1606,7 @@
             };
         }
 
-        // 8. Hook NetSocket to route WebSocket Protobuf RPCs to our in-process offline server
+        // 9. Hook NetSocket to route WebSocket Protobuf RPCs to our in-process offline server
         var nsMod = safeRequire("NetSocket");
         if (nsMod && nsMod.NetSocket) {
             var NetSocket = nsMod.NetSocket;
@@ -1529,7 +1657,7 @@
             };
         }
 
-        console.log("[Offline] HanhDaoKy Offline Server hooks installed successfully.");
+        console.log("[Offline] HanhDaoKy Offline Server v2 hooks installed successfully.");
     }
 
     // Export for Node.js testing as well as immediate install in Cocos
