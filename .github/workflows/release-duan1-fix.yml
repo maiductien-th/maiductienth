@@ -1,0 +1,46 @@
+name: Build and Release HanhDaoKy Offline Fix
+
+on:
+  push:
+    branches:
+      - fix/duan1-offline
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android packaging and smali tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apksigner zipalign libsmali-java zip unzip default-jdk-headless
+
+      - name: Download original duan1 APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download duan1 --pattern "HanhDaoKy-3.8.00-offline.apk" --dir .
+
+      - name: Patch, align, sign, and verify APK
+        run: |
+          python3 duan1-fix/patch_and_build.py HanhDaoKy-3.8.00-offline.apk HanhDaoKy-3.8.00-offline-fix1.apk
+          SHA256=$(sha256sum HanhDaoKy-3.8.00-offline-fix1.apk | awk '{print $1}')
+          printf '\n- **SHA-256:** `%s`\n' "$SHA256" >> duan1-fix/RELEASE_NOTES.md
+          ls -lh HanhDaoKy-3.8.00-offline-fix1.apk
+
+      - name: Publish GitHub Release duan1-fix1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete duan1-fix1 --yes 2>/dev/null || true
+          gh release create duan1-fix1 \
+            --target "${{ github.ref_name }}" \
+            --title "Hành Đạo Ký 3.8.00 Offline (Fix v1)" \
+            --notes-file duan1-fix/RELEASE_NOTES.md \
+            HanhDaoKy-3.8.00-offline-fix1.apk
