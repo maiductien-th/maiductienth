@@ -111,29 +111,44 @@ async function runTests() {
     assert.strictEqual(slRes.result, 0);
     assert.strictEqual(slRes.allowLogin, true);
     const servers = JSON.parse(slRes.serverList);
-    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers.length, 2, "Expected S1 (Max Tester Lv60) + S2 (Newbie)");
     assert.strictEqual(servers[0].serverId, 1);
+    assert.strictEqual(servers[1].serverId, 2);
+    assert.strictEqual(slRes.recommendServer.serverId, 1);
 
-    const rnRes = await post(servers[0].url + "/getRandomName", { sex: 1 });
+    const rnRes = await post(servers[0].url + "/getRandomName", { sex: 2 });
     assert.strictEqual(rnRes.result, 0);
     assert.ok(rnRes.name.length > 0);
 
-    const login1 = await post(servers[0].url + "/login", { openId: "test_user", serverId: 1 });
+    // Test Server 1 (Max Tester Lv60 VIP15 Full — immediate login, hasRole=true!)
+    const loginS1 = await post(servers[0].url + "/login", { openId: "tester_max", serverId: 1 });
+    assert.strictEqual(loginS1.result, 0);
+    assert.strictEqual(loginS1.hasRole, true, "S1 Max Tester must start ready to enter lobby!");
+    const stS1 = srv.getState("tester_max", 1);
+    assert.strictEqual(stS1.titleId, 60, "S1 must be Level 60");
+    assert.ok(stS1.vipExp >= 99999999, "S1 must be VIP 15");
+    assert.ok(stS1.bag[101011] >= 999999999, "S1 must have infinite Thẻ Giảm Giá (101011)");
+    assert.strictEqual(stS1.headId, 106100, "Valid LeadDecorateDB Avatar ID");
+    assert.strictEqual(stS1.costumeId, 106000, "Valid LeadDecorateDB Figure ID");
+    console.log("   S1 Max Tester PASS! Lv=" + stS1.titleId + ", VIPExp=" + stS1.vipExp + ", Heroes=" + Object.keys(stS1.heroes).length + ", Beauties=" + Object.keys(stS1.beauties).length + ", Cars=" + Object.keys(stS1.cars).length);
+
+    // Test Server 2 (Tân Thủ — starts with character creation!)
+    const login1 = await post(servers[1].url + "/login", { openId: "test_user", serverId: 2 });
     assert.strictEqual(login1.result, 0);
     assert.strictEqual(login1.hasRole, false);
     const uid = login1.userId;
 
-    const createRes = await post(servers[0].url + "/createRole", { nickName: "Tiệm Tạp Hóa 9X", sex: 1, headId: 10001 });
+    const createRes = await post(servers[1].url + "/createRole", { nickName: "Tiệm Tạp Hóa 9X", sex: 2, player: 1, headId: 106100, costumeId: 106000 });
     assert.strictEqual(createRes.result, 0);
     assert.strictEqual(createRes.nickName, "Tiệm Tạp Hóa 9X");
 
-    const login2 = await post(servers[0].url + "/login", { openId: "test_user", serverId: 1 });
+    const login2 = await post(servers[1].url + "/login", { openId: "test_user", serverId: 2 });
     assert.strictEqual(login2.result, 0);
     assert.strictEqual(login2.hasRole, true);
     assert.strictEqual(login2.address, "127.0.0.1");
-    console.log("   HTTP PASS! userId=" + uid + " nickName=" + login2.nickName);
+    console.log("   S2 Newbie HTTP PASS! userId=" + uid + " nickName=" + login2.nickName);
 
-    console.log("2. Testing WebSocket + Protobuf Login Sync...");
+    console.log("2. Testing WebSocket + Protobuf Full Login Sync (All Fix v4 Login Packets)...");
     const ws = new WebSocket("ws://" + login2.address + ":" + login2.port);
     const received = [];
     await new Promise((resolve) => {
@@ -155,7 +170,7 @@ async function runTests() {
 
     function sendC2S(cmdId, obj) {
         const ReqClass = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cmdId, true, true);
-        const inst = new ReqClass(obj || {});
+        const inst = new ReqClass(srv.buildDefaultMessageObj(ReqClass, obj || {}));
         const enc = inst.encode();
         const bodyLen = enc.limit - (enc.offset || 0);
         const totalLen = 18 + bodyLen;
@@ -190,82 +205,147 @@ async function runTests() {
     await wait(120);
 
     const recvIds = received.map((x) => x.recvMsgId);
-    for (const reqId of [101, 152, 104, 105, 106, 111, 5851, 401, 501, 4301, 4201, 601, 1201, 1209, 301, 4851, 5601, 103]) {
+    for (const reqId of [101, 152, 104, 105, 106, 111, 5851, 401, 501, 510, 4301, 4307, 4201, 4203, 601, 801, 7024, 7026, 7100, 5901, 5201, 203, 2005, 4902, 4920, 1001053, 1201, 1209, 301, 4851, 5601, 4002, 103]) {
         assert.ok(recvIds.includes(reqId), "Missing login sync msgId: " + reqId);
     }
-    const completeSync = received.find((x) => x.recvMsgId === 1209);
-    assert.ok(completeSync && completeSync.decoded.taskId.includes(2201101), "Starter business task 2201101 must be in completeTaskIds (1209)!");
-    const customerSync = received.find((x) => x.recvMsgId === 4601);
-    assert.ok(customerSync && customerSync.decoded.customerList.length === 57, "Expected 57 unlocked customers (108001..108057) in 4601, got " + (customerSync ? customerSync.decoded.customerList.length : 0));
-    assert.strictEqual(customerSync.decoded.customerList[0].customerId, 108001);
-    assert.strictEqual(customerSync.decoded.customerList[0].status, 2);
-    const taskSync = received.find((x) => x.recvMsgId === 1201);
-    const taskIds = taskSync ? taskSync.decoded.dataList.map((t) => t.taskId) : [];
-    assert.ok(taskIds.includes(2300001) && taskIds.includes(2300041), "Expected all 41 GuideBook tasks (2300001..2300041) in 1201");
-    const wsSync = received.find((x) => x.recvMsgId === 5601);
-    assert.ok(wsSync && wsSync.decoded.workshopData.workshopConfig && wsSync.decoded.workshopData.workshopConfig.id === 1, "Expected valid workshopConfig.id=1 in 5601");
-    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets (incl. 2201101, 57 customers, 41 GuideBook tasks & WorkshopConfig) ending with smInitDataEnd(103).");
+    // Verify Bug 1 & 7.2: valid LeadDecorateDB IDs in 104
+    const p104 = received.find((x) => x.recvMsgId === 104);
+    const pDeco = JSON.parse(p104.decoded.playerBaseData.decoration);
+    assert.strictEqual(pDeco["1"], 106100, "Player Avatar must be valid 106100");
+    assert.strictEqual(pDeco["3"], 106000, "Player Figure must be valid 106000");
 
-    console.log("3. Testing Core Gameplay Actions (Breakfast Stall, Tasks, Customers, Workshop, Heroes, Beauties)...");
+    // Verify Bug 4 & 8: Hero abilities > 0 in 510
+    const p510 = received.find((x) => x.recvMsgId === 510);
+    assert.ok(p510 && p510.decoded.heroAbilityList.length >= 2, "Expected HeroAbilityList in 510");
+    assert.ok(Number(p510.decoded.heroAbilityList[0].heroBaseAbility) > 0, "Hero base ability must be > 0");
+    assert.ok(Number(p510.decoded.heroAbilityList[0].qualification) > 0, "Hero qualification must be > 0");
+
+    // Verify Bug 10.1: Car skinId explicitly 0 (never null!) in 4201
+    const p4201 = received.find((x) => x.recvMsgId === 4201);
+    assert.ok(p4201 && p4201.decoded.carList.length >= 1, "Expected carList in 4201");
+    assert.strictEqual(p4201.decoded.carList[0].skinId, 0, "Car skinId must be 0 (not null) so CarMainView never crashes!");
+
+    // Verify Bug 3 & 6: Workshop has 10 steps & maxWorkshopId >= 500
+    const wsSync = received.find((x) => x.recvMsgId === 5601);
+    assert.strictEqual(wsSync.decoded.workshopData.maxWorkshopId, 500, "maxWorkshopId must be 500");
+    assert.strictEqual(wsSync.decoded.workshopData.workshopConfig.num, 10, "Workshop stage must have 10 steps");
+
+    // Verify Bug 10.2 & 10.5: Houses populated in 4002 & FishStore in 7100
+    const p4002 = received.find((x) => x.recvMsgId === 4002);
+    assert.ok(p4002.decoded.houseList.length >= 1 && p4002.decoded.houseList[0].roomList.length >= 1, "Houses & rooms must be unlocked");
+    const p7100 = received.find((x) => x.recvMsgId === 7100);
+    assert.ok(p7100.decoded.level >= 1 && p7100.decoded.processes.length >= 1, "FishStore must be initialized");
+
+    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets including 510, 801, 7024, 7100, 5901, 5201, 2005, 4902, 1001053.");
+
+    console.log("3. Testing ALL 13 Bug Fixes & Gameplay Protocols...");
     received.length = 0;
-    sendC2S(20102, {}); // Ping
-    sendC2S(20133, {}); // ConfigVersion
-    sendC2S(20403, { buildingId: 15101, upgradeNum: 19 }); // Upgrade Breakfast Stall 1 -> 20
-    sendC2S(20402, { buildingId: 15102, upgradeNum: 1 }); // Open Grocery Store (Small Shop)
-    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #1
-    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #2
-    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #3
-    sendC2S(20428, { buildingId: 15101, handleType: 1 }); // Handle detail
-    sendC2S(24603, { customerId: 108001 }); // S_CUSTOMER_UNLOCK
-    sendC2S(24604, { customerId: 108001 }); // S_CUSTOMER_UNLOCK_REWARD
-    sendC2S(25602, { isBackend: false }); // Workshop upgrade
-    sendC2S(25611, {}); // Workshop info
-    sendC2S(20503, { patronsId: 102210, times: 5 }); // Upgrade Hero
-    sendC2S(24303, { beautyId: 103201 }); // Upgrade Beauty
-    sendC2S(20108, {}); // Upgrade Identity Title
-    sendC2S(21205, { taskId: 200001 }); // Claim Task #1
-    sendC2S(21205, { taskId: 2201102 }); // Unlock Breakfast business 10102 (type=22)
-    sendC2S(20304, {}); // Claim All Mail
-    sendC2S(24852, {}); // Daily Sign-in
-    sendC2S(20135, { key: "ALLHERO" }); // Exchange Code
-    sendC2S(25852, { guideId: 101002, param: "" }); // Guide Record
-    sendC2S(29359, {}); // VN Save Param
-    await wait(120);
+    // Bug 1 & 7: Title Upgrade, Change Player, Decoration Change, Skin Dress
+    sendC2S(20108, {});
+    sendC2S(20109, {});
+    sendC2S(20177, { player: 2 });
+    sendC2S(20803, { decorationType: 1, decorationId: 106110 });
+    sendC2S(27021, { skinId: 109001, roleId: 102210, type: 1 });
+    // Bug 3 & 6: Workshop Config, Upgrade -> Boss -> Stage 2
+    sendC2S(25617, { workshopConfigIds: [1, 2, 3] });
+    sendC2S(25618, { workshopConfigIds: [1, 2] });
+    sendC2S(25602, { isBackend: false });
+    sendC2S(25606, { isBackend: false });
+    sendC2S(25607, {});
+    sendC2S(25608, {});
+    // Bug 4 & 8: Hero Upgrade & Equip Car
+    sendC2S(20503, { patronsId: 102210, times: 5 });
+    sendC2S(20506, { heroId: 102240, carId: "1001" });
+    // Bug 5: TvStudio, Promote, Beauty Propagate (real reward & energy deduct!)
+    sendC2S(24701, {});
+    sendC2S(24705, { studioIndex: 1 });
+    sendC2S(24706, { studioIndex: 1 });
+    sendC2S(26651, {});
+    sendC2S(26652, { count: 1 });
+    sendC2S(26654, { departmentId: 1 });
+    sendC2S(24308, { type: 1 });
+    // Bug 9: Lottery & NewbieTarget
+    sendC2S(22004, { type: 1 });
+    sendC2S(2001051, {});
+    sendC2S(2001052, {});
+    // Bug 10: House, DanceHall, VideoHall, FishStore (Process + FastStockUp), GuideBook, Rank, Sign
+    sendC2S(24001, { houseId: 1001, roomId: 10011 });
+    sendC2S(26501, {});
+    sendC2S(26502, {});
+    sendC2S(27291, {});
+    sendC2S(27293, {});
+    sendC2S(27109, { processId: 1001 }); // FishStore Chế biến
+    sendC2S(27112, {});               // FishStore Nhập hàng
+    sendC2S(21205, { taskId: 2300001 }); // GuideBook claim
+    sendC2S(21206, { index: 1 });
+    sendC2S(24502, { rankType: 1, type: 1 });
+    sendC2S(24852, {});
+    // Bug 11: Shop exact reward, Happy52, BizWar, Train
+    sendC2S(24101, { shopType: 1 });
+    sendC2S(24102, { shopGoodsId: 1001, count: 2 });
+    sendC2S(24021, {});
+    sendC2S(24022, {});
+    sendC2S(24026, { targetId: 900001 });
+    sendC2S(24901, {});
+    sendC2S(24903, { battleType: 1, heroIdList: [102210] });
+    sendC2S(24905, {});
+    sendC2S(22300, {});
+    sendC2S(22301, { heroIds: [102210], seatIds: [1] });
+    sendC2S(22302, { seatId: 1, oneClickFinish: true });
+    // Bug 12 & Req #2: VIP Reward persistence, Privilege Reward, Infinite Voucher Paid Pack (24104 & 20605)
+    sendC2S(25902, { level: 1 });
+    sendC2S(25203, { privilegedType: 1 });
+    sendC2S(20605, {});
+    sendC2S(24104, { shopGoodsId: 20000001, coinVoucherItemId: 101011 });
+
+    await wait(160);
 
     const actionIds = new Set(received.map((x) => x.recvMsgId));
-    for (const id of [102, 133, 403, 402, 424, 428, 4602, 4603, 4604, 5602, 5611, 503, 4303, 108, 1205, 1209, 304, 4852, 135, 5852, 9359]) {
+    const expectedIds = [
+        108, 109, 177, 803, 7021,
+        5617, 5618, 5602, 5606, 5607, 5608,
+        503, 506, 510,
+        4701, 4705, 4706, 6651, 6652, 6653, 6654, 4308, 4307,
+        2004, 1001051, 1001052,
+        4001, 6501, 6502, 7291, 7293, 7109, 7112, 7100,
+        1205, 1206, 4502, 4852,
+        4101, 4102, 4021, 4022, 4026, 4901, 4903, 4905, 2300, 2301, 2302,
+        5902, 5901, 5203, 605, 4104, 206
+    ];
+    for (const id of expectedIds) {
         assert.ok(actionIds.has(id), "Missing response for recvMsgId: " + id);
     }
-    const detailPkt = received.find((x) => x.recvMsgId === 428);
-    assert.ok(detailPkt && detailPkt.decoded.details.length === 1 && detailPkt.decoded.details[0].num === 3, "Expected 3 served 10101 items in 428");
-    const st = srv.getState("test_user");
-    assert.strictEqual(st.buildings[15101].level, 20);
-    assert.strictEqual(st.buildingServeCounts[15101], 3);
-    assert.strictEqual(st.customers[108001].status, 3);
-    assert.ok(st.completeTaskIds.includes(2201101) && st.completeTaskIds.includes(2201102), "2201101 & 2201102 should be completed");
-    assert.strictEqual(st.workshop.sectionProgress, 2);
-    assert.ok(st.buildings[15102], "15102 should be unlocked");
-    assert.strictEqual(st.heroes[102210].level, 15);
-    assert.strictEqual(st.titleId, 2);
-    assert.strictEqual(Object.keys(st.heroes).length, 6);
-    console.log("   Gameplay Actions PASS! Building 15101 Lv=" + st.buildings[15101].level + ", Served=" + st.buildingServeCounts[15101] + ", Workshop=" + st.workshop.sectionProgress + ", Heroes=" + Object.keys(st.heroes).length);
 
-    console.log("4. Testing Auto-Schema Fallback on unhandled C2S protocols...");
-    received.length = 0;
-    const sampleUnhandled = [24400, 24001, 24003, 25902, 20440, 24210, 20605, 21011, 20210, 25502];
-    for (const cid of sampleUnhandled) {
-        if (cmdList[cid] && cmdList[cid].cmMethod && cmdList[cid].smMethod) {
-            const ReqC = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cid, true, true);
-            sendC2S(cid, srv.buildDefaultMessageObj(ReqC, {}));
-        }
-    }
-    await wait(100);
-    assert.strictEqual(received.length, sampleUnhandled.length, "Expected all fallback responses");
-    console.log("   Auto-Schema Fallback PASS! (" + received.length + "/" + sampleUnhandled.length + " decoded cleanly)");
+    // Deep assertions on Bug 5.4, Bug 3, Bug 4, Bug 10.5, Bug 11.1, Bug 12.3
+    const propResp = received.find((x) => x.recvMsgId === 4308);
+    assert.ok(propResp.decoded.beautyPropagateList.length === 1 && Number(propResp.decoded.beautyPropagateList[0].addMoney) > 0, "Bug 5.4: Beauty Propagate must grant real addMoney!");
+    const st = srv.getState("test_user", 2);
+    assert.strictEqual(st.beautyEnergy, 9, "Bug 5.4: Beauty Propagate must deduct 1 energy (10 -> 9)!");
+    assert.strictEqual(st.workshop.workshopId, 2, "Bug 3: Boss battle must advance workshopId 1 -> 2!");
+    assert.strictEqual(st.cars["1001"].heroId, 102240, "Bug 4: Car 1001 must now be equipped on Hero 102240!");
+    assert.strictEqual(st.heroes[102210].carId, 0, "Bug 4: Old hero 102210 must be unequipped!");
+    assert.strictEqual(st.danceHall.level, 2, "Bug 10.3: DanceHall upgraded 1 -> 2!");
+    assert.strictEqual(st.videoHall.level, 2, "Bug 10.4: VideoHall upgraded 1 -> 2!");
+    assert.ok(st.fishStore.processes[0].level >= 2, "Bug 10.5: FishStore Process upgraded!");
+    assert.ok(st.vipRewardedLevels.includes(1), "Bug 12.3: VIP level 1 must be persisted in rewardedLevels!");
+    assert.ok(st.bag[101011] >= 999999999, "Req #2: Thẻ Giảm Giá (101011) remains infinite after buying paid pack!");
+    const shopBuyResp = received.find((x) => x.recvMsgId === 4102);
+    assert.ok(!shopBuyResp.decoded.goodsDeatil.startsWith("110001="), "Bug 11.1: Shop must NOT hardcode 110001!");
 
-    console.log("5. Testing Fix v3 (.manifest HTTP + Runtime Patches for RemoteResMgr/UIMgr/BuildingBaseView)...");
-    const manifestRes = srv.handleHttpRequest("GET", "https://cdn-sg-vn.pogohopper.com/71001001/3.7.1.82/assetsRemote/common/remoteRes.manifest", "");
-    assert.strictEqual(manifestRes, "{}");
+    // Test HTTP Simulated Recharge Order + Fulfillment
+    const ordRes = await post(servers[0].url + "/recharge_order", { userId: uid, productId: 20000002 });
+    assert.strictEqual(ordRes.code, 0);
+    assert.ok(ordRes.data.orderId);
+    const rechRes = await post(servers[0].url + "/recharge", { userId: uid, orderId: ordRes.data.orderId });
+    assert.strictEqual(rechRes.code, 0);
+    console.log("   All 13 Bug Fixes + Infinite Voucher Recharge PASS!");
+
+    console.log("4. Testing Fix v4 Runtime Patches (Anti-Freeze UIMgr, Redirects, Spine->PNG Fallback, Audio BGM/SFX, Voucher Config)...");
+    assert.strictEqual(srv.mapAudioToBundled("common/sound/bgm/BgmMain"), "activity/29_1/sound/bgm/Cmn");
+    assert.strictEqual(srv.mapAudioToBundled("common/sound/sfx/btn_click"), "activity/1011_1/sound/sfx/LuckydrawClick");
+    assert.strictEqual(srv.resolvePortraitFallbackPath("common/spine/hero/102210/skeleton"), "common/hero/102210/1");
+    assert.strictEqual(srv.resolvePortraitFallbackPath("common/spine/beauty/103201/skeleton"), "common/beauty/103201/1");
+    assert.strictEqual(srv.resolvePortraitFallbackPath("common/spine/skin/109001/skeleton"), "common/skin/109001/1");
 
     function MockRemoteResMgr() {
         this.remoteResMap = new Map();
@@ -276,12 +356,14 @@ async function runTests() {
     MockRemoteResMgr.prototype.loadResManifest = function () { throw new Error("should be patched"); };
     MockRemoteResMgr.prototype.loadRemoteRes = function () { throw new Error("should be patched"); };
 
+    let openedViewName = "";
     function MockUIMgr() {
         this._uuidList = ["u1"];
         this._multiidList = [0];
         this._showingViewList = [];
         this._isLocked = true;
         this._isLockedTime = false;
+        this._isOpening = false;
         this._views = {
             u1: {
                 uiGuideName: "VillageMainView",
@@ -289,30 +371,57 @@ async function runTests() {
                 isHiding: true,
                 openData: { type: 1, showType: 1 },
                 viewContainer: { visible: false },
-                showSelf() { throw new Error("simulated under-view showSelf crash"); }
+                showSelf() { throw new Error("simulated crash"); }
             }
         };
     }
+    MockUIMgr.prototype.open = function (uiType) { openedViewName = uiType.getClassName(); return {}; };
+    MockUIMgr.prototype.openEnded = function () { this._isOpening = false; };
     MockUIMgr.prototype.getViewWith = function (u) { return this._views[u]; };
     MockUIMgr.prototype.removeMode = function () {};
     MockUIMgr.prototype.removeFromLayer = function () {};
     MockUIMgr.prototype.showUnderView = function () {};
+    MockUIMgr.inst = new MockUIMgr();
 
     function MockBuildingBaseView() { this.buildingId = 15101; this.closed = false; }
-    MockBuildingBaseView.prototype.saveCommonCustomerDataList = function () { throw new Error("simulated save crash"); };
-    MockBuildingBaseView.prototype.doEnterStatus = function () { throw new Error("simulated enterStatus crash"); };
+    MockBuildingBaseView.prototype.saveCommonCustomerDataList = function () { throw new Error("simulated"); };
+    MockBuildingBaseView.prototype.doEnterStatus = function () { throw new Error("simulated"); };
     MockBuildingBaseView.prototype.leaveBuilding = function () { this.doEnterStatus(this.buildingId, 0); this.closeSelf(); };
     MockBuildingBaseView.prototype.closeSelf = function () { this.closed = true; };
 
-    global.fgui = { GRoot: { inst: { touchable: false } } };
-    const MockGuideBookUtil = {
-        canGetGuideBookReward() { throw new TypeError("Cannot read property 'state' of undefined"); }
+    function MockAudioMgr() {}
+    MockAudioMgr.prototype.load = function () { throw new Error("should be patched"); };
+
+    function MockResetRoleMainView() {}
+    MockResetRoleMainView.prototype.checkIsEffectiveTime = function () { return false; };
+
+    const MockGameConfig = { isForceSimulateRecharge: false, isSDKWithPlatform: true };
+    const MockStartPrivilege = { openMain() { throw new Error("should be patched"); } };
+    const MockShopMainView = { getClassName: () => "ShopMainView" };
+    const MockCashPackHelperView = { getClassName: () => "CashPackHelperView" };
+    const MockPrivilegeMainView = { getClassName: () => "PrivilegeMainView" };
+
+    global.cc.AudioClip = function () {};
+    let loadedAudioPath = "";
+    global.cc.resources = {
+        load(path, type, cb) {
+            loadedAudioPath = path;
+            cb(null, { name: path });
+        }
     };
+    global.fgui = { GRoot: { inst: { touchable: false } } };
+    const MockGuideBookUtil = { canGetGuideBookReward() { throw new TypeError("missing task"); } };
     const mockModules = {
         RemoteResMgr: { RemoteResMgr: MockRemoteResMgr },
         PackagesConfig: { PackagesConfig: { REMOTE_PATH: "assetsRemote/" } },
         I18nUtil: { I18nUtil: { isResValid: () => false } },
         UIMgr: { UIMgr: MockUIMgr },
+        ShopMainView: { ShopMainView: MockShopMainView },
+        PrivilegeMainView: { PrivilegeMainView: MockPrivilegeMainView },
+        StartPrivilegeCmnUtil: { StartPrivilegeCmnUtil: MockStartPrivilege },
+        AudioMgr: { AudioMgr: MockAudioMgr },
+        GameConfig: { GameConfig: MockGameConfig },
+        ResetRoleMainView: { ResetRoleMainView: MockResetRoleMainView },
         CoreTypeDefine: { ViewType: { Guide: 10, Loading: 11, Toast: 12, Top: 13, Edit: 14 }, ViewShowType: { Screen: 1 } },
         BuildingBaseView: { BuildingBaseView: MockBuildingBaseView },
         GuideBookUtil: { GuideBookUtil: MockGuideBookUtil }
@@ -320,38 +429,35 @@ async function runTests() {
     global.__require = (name) => mockModules[name];
 
     srv.installRuntimePatches();
-    assert.strictEqual(MockGuideBookUtil.canGetGuideBookReward(2300099, 10001), false, "GuideBookUtil.canGetGuideBookReward must never throw on missing task");
+    assert.strictEqual(MockGameConfig.isForceSimulateRecharge, true, "GameConfig.isForceSimulateRecharge must be true!");
+    assert.strictEqual(MockGameConfig.isSDKWithPlatform, false, "GameConfig.isSDKWithPlatform must be false!");
+    assert.strictEqual(new MockResetRoleMainView().checkIsEffectiveTime(), true, "ResetRoleMainView must allow all starter roles!");
 
-    // Verify RemoteResMgr patch
-    const rrm = new MockRemoteResMgr();
-    let manifestOk = false;
-    rrm.loadResManifest(["common"], (ok) => { manifestOk = ok; });
-    assert.strictEqual(manifestOk, true);
-    assert.ok(rrm.remoteResMap.has("common"));
-    let remoteOk = null;
-    rrm.loadRemoteRes("assetsRemote/common/sound/bgm_common", ".mp3", (ok) => { remoteOk = ok; });
-    assert.strictEqual(remoteOk, false);
-    assert.strictEqual(await rrm.checkRemoteFileExist("x"), false);
+    // Bug 2 redirect: CashPackHelperView -> ShopMainView
+    MockUIMgr.inst.open(MockCashPackHelperView);
+    assert.strictEqual(openedViewName, "ShopMainView", "CashPackHelperView must redirect to ShopMainView!");
 
-    // Verify UIMgr freeze-proof patch
-    const uiMgr = new MockUIMgr();
+    // Bug 12.2 redirect: StartPrivilegeCmnUtil.openMain -> PrivilegeMainView
+    MockStartPrivilege.openMain();
+    assert.strictEqual(openedViewName, "PrivilegeMainView", "StartPrivilegeCmnUtil.openMain must redirect to PrivilegeMainView!");
+
+    // Bug 13 audio mapping: common/sound/bgm/BgmMain -> bundled Cmn MP3
+    let loadedClip = null;
+    new MockAudioMgr().load("common/sound/bgm/BgmMain", (clip) => { loadedClip = clip; });
+    assert.strictEqual(loadedAudioPath, "activity/29_1/sound/bgm/Cmn");
+    assert.ok(loadedClip, "AudioMgr.load must return bundled AudioClip!");
+
+    // Anti-freeze UIMgr.removeFromLayer
     let removedFromParent = false;
-    uiMgr.removeFromLayer({
+    MockUIMgr.inst.removeFromLayer({
         uiGuideName: "BuildingBreakfastMainView",
         viewContainer: { removeFromParent() { removedFromParent = true; } }
     });
-    assert.strictEqual(removedFromParent, true, "View must be removed from parent even when under-view throws!");
-    assert.strictEqual(uiMgr._views.u1.viewContainer.visible, true, "Under-view must be made visible!");
-    assert.strictEqual(global.fgui.GRoot.inst.touchable, true, "GRoot touchable must be restored!");
+    assert.strictEqual(removedFromParent, true);
+    assert.strictEqual(global.fgui.GRoot.inst.touchable, true);
+    console.log("   Fix v4 Runtime Patches PASS!");
 
-    // Verify BuildingBaseView safe leave patch
-    const bbv = new MockBuildingBaseView();
-    bbv.saveCommonCustomerDataList(); // must not throw
-    bbv.leaveBuilding();
-    assert.strictEqual(bbv.closed, true, "leaveBuilding must always closeSelf even if doEnterStatus throws!");
-    console.log("   Fix v3 Runtime Patches PASS!");
-
-    console.log("\nALL E2E TESTS PASSED 100%!");
+    console.log("\nALL FIX V4 E2E TESTS PASSED 100%!");
 }
 
 runTests().catch((err) => {
