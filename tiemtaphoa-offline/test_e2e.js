@@ -190,44 +190,57 @@ async function runTests() {
     await wait(120);
 
     const recvIds = received.map((x) => x.recvMsgId);
-    for (const reqId of [101, 152, 104, 105, 106, 111, 5851, 401, 501, 4301, 4201, 601, 1201, 301, 4851, 103]) {
+    for (const reqId of [101, 152, 104, 105, 106, 111, 5851, 401, 501, 4301, 4201, 601, 1201, 1209, 301, 4851, 5601, 103]) {
         assert.ok(recvIds.includes(reqId), "Missing login sync msgId: " + reqId);
     }
-    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets ending with smInitDataEnd(103).");
+    const completeSync = received.find((x) => x.recvMsgId === 1209);
+    assert.ok(completeSync && completeSync.decoded.taskId.includes(2201101), "Starter business task 2201101 must be in completeTaskIds (1209)!");
+    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets (incl. 2201101 & Workshop 5601) ending with smInitDataEnd(103).");
 
-    console.log("3. Testing Core Gameplay Actions...");
+    console.log("3. Testing Core Gameplay Actions (Breakfast Stall, Tasks, Workshop, Heroes, Beauties)...");
     received.length = 0;
     sendC2S(20102, {}); // Ping
     sendC2S(20133, {}); // ConfigVersion
-    sendC2S(20403, { buildingId: 15101, upgradeNum: 10 }); // Upgrade Breakfast Stall +10
+    sendC2S(20403, { buildingId: 15101, upgradeNum: 19 }); // Upgrade Breakfast Stall 1 -> 20
     sendC2S(20402, { buildingId: 15102, upgradeNum: 1 }); // Open Grocery Store (Small Shop)
-    sendC2S(20424, { buildingId: 15101, handleType: 1 }); // Serve customer
+    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #1
+    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #2
+    sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #3
+    sendC2S(20428, { buildingId: 15101, handleType: 1 }); // Handle detail
+    sendC2S(25602, { isBackend: false }); // Workshop upgrade
+    sendC2S(25611, {}); // Workshop info
     sendC2S(20503, { patronsId: 102210, times: 5 }); // Upgrade Hero
     sendC2S(24303, { beautyId: 103201 }); // Upgrade Beauty
     sendC2S(20108, {}); // Upgrade Identity Title
-    sendC2S(21205, { taskId: 200001 }); // Claim Task Reward
+    sendC2S(21205, { taskId: 200001 }); // Claim Task #1
+    sendC2S(21205, { taskId: 2201102 }); // Unlock Breakfast business 10102 (type=22)
     sendC2S(20304, {}); // Claim All Mail
     sendC2S(24852, {}); // Daily Sign-in
     sendC2S(20135, { key: "ALLHERO" }); // Exchange Code
     sendC2S(25852, { guideId: 101002, param: "" }); // Guide Record
     sendC2S(29359, {}); // VN Save Param
-    await wait(100);
+    await wait(120);
 
     const actionIds = new Set(received.map((x) => x.recvMsgId));
-    for (const id of [102, 133, 403, 402, 424, 503, 4303, 108, 1205, 304, 4852, 135, 5852, 9359]) {
+    for (const id of [102, 133, 403, 402, 424, 428, 5602, 5611, 503, 4303, 108, 1205, 1209, 304, 4852, 135, 5852, 9359]) {
         assert.ok(actionIds.has(id), "Missing response for recvMsgId: " + id);
     }
+    const detailPkt = received.find((x) => x.recvMsgId === 428);
+    assert.ok(detailPkt && detailPkt.decoded.details.length === 1 && detailPkt.decoded.details[0].num === 3, "Expected 3 served 10101 items in 428");
     const st = srv.getState("test_user");
-    assert.strictEqual(st.buildings[15101].level, 11);
+    assert.strictEqual(st.buildings[15101].level, 20);
+    assert.strictEqual(st.buildingServeCounts[15101], 3);
+    assert.ok(st.completeTaskIds.includes(2201101) && st.completeTaskIds.includes(2201102), "2201101 & 2201102 should be completed");
+    assert.strictEqual(st.workshop.sectionProgress, 2);
     assert.ok(st.buildings[15102], "15102 should be unlocked");
     assert.strictEqual(st.heroes[102210].level, 15);
     assert.strictEqual(st.titleId, 2);
     assert.strictEqual(Object.keys(st.heroes).length, 6);
-    console.log("   Gameplay Actions PASS! Building 15101 Lv=" + st.buildings[15101].level + ", Heroes=" + Object.keys(st.heroes).length + ", Silver=" + st.silver);
+    console.log("   Gameplay Actions PASS! Building 15101 Lv=" + st.buildings[15101].level + ", Served=" + st.buildingServeCounts[15101] + ", Workshop=" + st.workshop.sectionProgress + ", Heroes=" + Object.keys(st.heroes).length);
 
-    console.log("4. Testing Auto-Schema Fallback on 30 unhandled C2S protocols...");
+    console.log("4. Testing Auto-Schema Fallback on unhandled C2S protocols...");
     received.length = 0;
-    const sampleUnhandled = [24400, 24001, 24003, 25611, 25902, 20440, 24210, 24603, 20605, 21011, 20210, 25502];
+    const sampleUnhandled = [24400, 24001, 24003, 25902, 20440, 24210, 24603, 20605, 21011, 20210, 25502];
     for (const cid of sampleUnhandled) {
         if (cmdList[cid] && cmdList[cid].cmMethod && cmdList[cid].smMethod) {
             const ReqC = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cid, true, true);

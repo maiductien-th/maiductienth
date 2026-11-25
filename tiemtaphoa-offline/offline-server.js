@@ -389,9 +389,32 @@
             mainTaskId: 200001,
             tasks: {
                 200001: { taskId: 200001, value: "1", state: 0, finishTime: 0, taskStartTime: 0, taskEndTime: 0 },
-                100001: { taskId: 100001, value: "1", state: 0, finishTime: 0, taskStartTime: 0, taskEndTime: 0 }
+                100001: { taskId: 100001, value: "1", state: 0, finishTime: 0, taskStartTime: 0, taskEndTime: 0 },
+                2201101: { taskId: 2201101, value: "1", state: 1, finishTime: Math.floor(now / 1000), taskStartTime: 0, taskEndTime: 0 }
             },
-            completeTaskIds: [],
+            completeTaskIds: [2201101],
+            buildingHandleDetails: {},
+            heroSkillUpgradeCount: 0,
+            workshop: {
+                workshopId: 1,
+                sectionProgress: 1,
+                buyBuffTimes: 0,
+                itemBuyBuffTimes: 0,
+                events: [],
+                isBoss: 0,
+                autoBuyBuffTimes: 0,
+                autoItemBuyBuffTimes: 0,
+                sceneEvent: [],
+                urgeTime: 0,
+                urgeCount: 0,
+                waste: 0,
+                workerEarnSpeedAdd: 0,
+                workerEarnFixedAdd: 0,
+                totalWorkerEarnSpeedAdd: 0,
+                totalWorkerEarnFixedAdd: 0,
+                totalEarnAddValue: 0,
+                maxWorkshopId: 1
+            },
             taskActive: 10,
             taskActiveRewards: [],
             sevenDayActive: 10,
@@ -435,6 +458,162 @@
         };
     }
 
+    function ensureBusinessInBuilding(b, businessId) {
+        if (!b) return false;
+        b.businessList = b.businessList || [];
+        for (var i = 0; i < b.businessList.length; i++) {
+            if (Number(b.businessList[i].businessId) === Number(businessId)) return false;
+        }
+        b.businessList.push({ businessId: Number(businessId), status: 0 });
+        return true;
+    }
+
+    function syncAllBusinessTasks(st) {
+        var changedTasks = [];
+        var newlyCompletedIds = [];
+        var changedBuildings = [];
+        if (!st || !st.buildings) return { changedTasks: changedTasks, newlyCompletedIds: newlyCompletedIds, changedBuildings: changedBuildings };
+
+        st.tasks = st.tasks || {};
+        st.completeTaskIds = st.completeTaskIds || [];
+
+        // Always guarantee Breakfast Stall starter dish (10101 -> unlockCondition 2201101)
+        if (st.buildings[15101]) {
+            if (st.completeTaskIds.indexOf(2201101) < 0) {
+                st.completeTaskIds.push(2201101);
+                newlyCompletedIds.push(2201101);
+            }
+            if (ensureBusinessInBuilding(st.buildings[15101], 10101)) {
+                changedBuildings.push(st.buildings[15101]);
+            }
+            if (!st.tasks[2201101]) {
+                st.tasks[2201101] = {
+                    taskId: 2201101,
+                    value: String(st.buildings[15101].level || 1),
+                    state: 1,
+                    finishTime: Math.floor(Date.now() / 1000),
+                    taskStartTime: 0,
+                    taskEndTime: 0
+                };
+                changedTasks.push(st.tasks[2201101]);
+            }
+        }
+
+        var dbUtil = getDBUtil();
+        if (!dbUtil || !dbUtil.getStoreSetingListByBuildingId || !dbUtil.getTask) {
+            return { changedTasks: changedTasks, newlyCompletedIds: newlyCompletedIds, changedBuildings: changedBuildings };
+        }
+
+        var nowSec = Math.floor(Date.now() / 1000);
+        for (var bidKey in st.buildings) {
+            if (!st.buildings.hasOwnProperty(bidKey)) continue;
+            var bid = Number(bidKey);
+            var b = st.buildings[bidKey];
+            if (!b) continue;
+            var bLv = Number(b.level || 1);
+            var sList = [];
+            try { sList = dbUtil.getStoreSetingListByBuildingId(bid) || []; } catch (e) {}
+            var bModified = false;
+
+            for (var i = 0; i < sList.length; i++) {
+                var sCfg = sList[i];
+                if (!sCfg || Number(sCfg.type) !== 1 || !sCfg.unlockCondition) continue;
+                var uTid = Number(sCfg.unlockCondition);
+                var tCfg = null;
+                try { tCfg = dbUtil.getTask(uTid); } catch (e) {}
+                var reqLv = 1;
+                if (tCfg && tCfg.completeParams) {
+                    var parts = String(tCfg.completeParams).split("|");
+                    reqLv = parseInt(parts[3] || "1", 10) || 1;
+                }
+
+                // Auto-unlock starter dishes (reqLv <= 1) for any opened building
+                if (reqLv <= 1) {
+                    if (st.completeTaskIds.indexOf(uTid) < 0) {
+                        st.completeTaskIds.push(uTid);
+                        newlyCompletedIds.push(uTid);
+                    }
+                    if (ensureBusinessInBuilding(b, sCfg.id)) {
+                        bModified = true;
+                    }
+                }
+
+                var isDone = st.completeTaskIds.indexOf(uTid) >= 0;
+                if (isDone && ensureBusinessInBuilding(b, sCfg.id)) {
+                    bModified = true;
+                }
+
+                var existing = st.tasks[uTid];
+                var targetValStr = String(bLv);
+                if (!existing) {
+                    st.tasks[uTid] = {
+                        taskId: uTid,
+                        value: targetValStr,
+                        state: isDone ? 1 : 0,
+                        finishTime: isDone ? nowSec : 0,
+                        taskStartTime: 0,
+                        taskEndTime: 0
+                    };
+                    changedTasks.push(st.tasks[uTid]);
+                } else {
+                    var dirty = false;
+                    if (Number(existing.value || 0) < bLv) {
+                        existing.value = targetValStr;
+                        dirty = true;
+                    }
+                    if (isDone && existing.state !== 1) {
+                        existing.state = 1;
+                        existing.finishTime = existing.finishTime || nowSec;
+                        dirty = true;
+                    }
+                    if (dirty) changedTasks.push(existing);
+                }
+            }
+            if (bModified && changedBuildings.indexOf(b) < 0) {
+                changedBuildings.push(b);
+            }
+        }
+        return { changedTasks: changedTasks, newlyCompletedIds: newlyCompletedIds, changedBuildings: changedBuildings };
+    }
+
+    function migrateState(st) {
+        if (!st) return st;
+        if (!st.completeTaskIds) st.completeTaskIds = [];
+        if (!st.buildingHandleDetails) st.buildingHandleDetails = {};
+        if (!st.buildingServeCounts) st.buildingServeCounts = { 15101: 0 };
+        if (st.heroSkillUpgradeCount === undefined) st.heroSkillUpgradeCount = 0;
+        if (!st.workshop) {
+            st.workshop = {
+                workshopId: 1,
+                sectionProgress: 1,
+                buyBuffTimes: 0,
+                itemBuyBuffTimes: 0,
+                events: [],
+                isBoss: 0,
+                autoBuyBuffTimes: 0,
+                autoItemBuyBuffTimes: 0,
+                sceneEvent: [],
+                urgeTime: 0,
+                urgeCount: 0,
+                waste: 0,
+                workerEarnSpeedAdd: 0,
+                workerEarnFixedAdd: 0,
+                totalWorkerEarnSpeedAdd: 0,
+                totalWorkerEarnFixedAdd: 0,
+                totalEarnAddValue: 0,
+                maxWorkshopId: 1
+            };
+        }
+        // Repair Breakfast Stall starter business (2201101 -> 10101) on older saves
+        if (st.buildings && st.buildings[15101]) {
+            if (st.completeTaskIds.indexOf(2201101) < 0) {
+                st.completeTaskIds.push(2201101);
+            }
+            ensureBusinessInBuilding(st.buildings[15101], 10101);
+        }
+        return st;
+    }
+
     function getState(openId) {
         openId = openId || currentOpenId || "tiemtaphoa01";
         currentOpenId = openId;
@@ -446,9 +625,9 @@
                 for (var k in def) {
                     if (saved[k] === undefined) saved[k] = def[k];
                 }
-                stateCache[openId] = saved;
+                stateCache[openId] = migrateState(saved);
             } else {
-                stateCache[openId] = createInitialState(openId);
+                stateCache[openId] = migrateState(createInitialState(openId));
             }
         }
         return stateCache[openId];
@@ -543,26 +722,68 @@
                 val = Math.max(1, st.loginTotalDays || 1);
                 break;
             case 3: // building level
-                val = st.buildings[p2] ? st.buildings[p2].level : 0;
+                val = st.buildings[p2] ? Number(st.buildings[p2].level || 1) : 0;
+                break;
+            case 18: // hero skill upgrade count
+                val = Number(st.heroSkillUpgradeCount || 0);
                 break;
             case 104: // unlock building
                 val = st.buildings[p2] ? 1 : 0;
                 break;
+            case 105: { // total dispatched heroes across buildings
+                var dispCnt = 0;
+                for (var dbKey in st.buildings) {
+                    if (!st.buildings.hasOwnProperty(dbKey)) continue;
+                    var hl = st.buildings[dbKey].heroIdList || [];
+                    dispCnt += hl.length;
+                }
+                val = dispCnt;
+                break;
+            }
+            case 106: { // count heroes with level >= p2
+                var hCnt = 0;
+                for (var hKey in st.heroes) {
+                    if (!st.heroes.hasOwnProperty(hKey)) continue;
+                    if (Number(st.heroes[hKey].level || 1) >= p2) hCnt++;
+                }
+                val = hCnt;
+                break;
+            }
             case 109: // identity title level
                 val = st.titleId || 1;
                 break;
-            case 157: // serve customers in building
-                val = (st.buildingServeCounts && st.buildingServeCounts[p2]) ? st.buildingServeCounts[p2] : 0;
+            case 154: { // workshop section progress (cparams: 0|0|workshopId|targetProgress)
+                var ws = st.workshop || { workshopId: 1, sectionProgress: 1 };
+                if (Number(ws.workshopId || 1) > p2) {
+                    val = target;
+                } else if (Number(ws.workshopId || 1) === p2) {
+                    val = Number(ws.sectionProgress || 1);
+                } else {
+                    val = 0;
+                }
                 break;
-            case 170: // unlock business
+            }
+            case 157: // serve customers in building
+                val = (st.buildingServeCounts && st.buildingServeCounts[p2]) ? Number(st.buildingServeCounts[p2]) : 0;
+                break;
+            case 170: { // unlock business
                 for (var bid in st.buildings) {
                     if (!st.buildings.hasOwnProperty(bid)) continue;
                     var bl = st.buildings[bid].businessList || [];
                     for (var j = 0; j < bl.length; j++) {
-                        if (bl[j].businessId === p2) val = 1;
+                        if (Number(bl[j].businessId) === p2) val = 1;
                     }
                 }
+                if (!val && dbUtil.getStoreSeting) {
+                    try {
+                        var sCfg = dbUtil.getStoreSeting(p2);
+                        if (sCfg && sCfg.unlockCondition && st.completeTaskIds && st.completeTaskIds.indexOf(Number(sCfg.unlockCondition)) >= 0) {
+                            val = 1;
+                        }
+                    } catch (e) {}
+                }
                 break;
+            }
             default:
                 // For any other main task type, keep existing value or auto-progress gently
                 var existing = st.tasks[taskId];
@@ -1202,11 +1423,27 @@
                     st = getState(req.openId);
                     uid = st.userId;
                 }
+                migrateState(st);
+                syncAllBusinessTasks(st);
                 tickPassiveIncome(st);
                 recalcEarnSpeed(st);
                 st.lastLoginTime = now;
                 evaluateTaskProgress(st, st.mainTaskId || 200001);
+                updateAllActiveTasks(st);
                 saveState(st);
+
+                // Always allow returning to Main Lobby from Breakfast Stall (btnClose visible from Task #1)
+                try {
+                    var dbU = getDBUtil();
+                    if (dbU && dbU.getConfigByParam) {
+                        var backCfg = dbU.getConfigByParam("GUIDE_BREAKFAST_SHOW_BACK_BTN_TASK");
+                        if (backCfg) backCfg.value = "200001";
+                    }
+                    var bMod = getModule("BuildingMgr");
+                    if (bMod && bMod.BuildingMgr && bMod.BuildingMgr.inst && bMod.BuildingMgr.inst.model) {
+                        bMod.BuildingMgr.inst.model.configGuideBreakfastShowBackBtnTask = 200001;
+                    }
+                } catch (e) {}
 
                 // 1. LoginRespMsg (101)
                 this._push(101, uid, {
@@ -1269,7 +1506,10 @@
                     today: { items: [], lucks: [] },
                     yesterday: { items: [], lucks: [] }
                 });
-                // 18. Privileges (5201), House (4002), AllCommon (1000302, 1000303)
+                // 18. Workshop (5601), Privileges (5201), House (4002), AllCommon (1000302, 1000303)
+                if (st.workshop) {
+                    this._push(5601, uid, { workshopData: st.workshop });
+                }
                 this._push(5201, uid, { privilegedList: [] });
                 this._push(4002, uid, { houseList: [], houseComfortLevel: 1, houseComfortValue: 0 });
                 this._push(1000302, uid, { heroList: [], beautyList: [], typeList: [] });
@@ -1413,19 +1653,6 @@
             case 20419: { // S_BUILDING_OPEN
                 var bid = Number(req.buildingId || 15101);
                 if (!st.buildings[bid]) {
-                    var defaultBiz = [];
-                    var dbUtil = getDBUtil();
-                    if (dbUtil && dbUtil.getStoreSetingListByBuildingId) {
-                        try {
-                            var sl = dbUtil.getStoreSetingListByBuildingId(bid) || [];
-                            for (var si = 0; si < sl.length; si++) {
-                                if (sl[si].type === 1) {
-                                    defaultBiz.push({ businessId: sl[si].id, status: 0 });
-                                    break;
-                                }
-                            }
-                        } catch (e) {}
-                    }
                     st.buildings[bid] = {
                         buildingId: bid,
                         level: 1,
@@ -1433,7 +1660,7 @@
                         buildingStatus: 2,
                         cleanItemList: [],
                         heroIdList: [],
-                        businessList: defaultBiz,
+                        businessList: [],
                         buildingName: "",
                         questionNum: 3,
                         autoSwitch: 1,
@@ -1442,9 +1669,16 @@
                 } else {
                     st.buildings[bid].buildingStatus = 2;
                 }
+                var bSyncOpen = syncAllBusinessTasks(st);
                 recalcEarnSpeed(st);
                 saveState(st);
                 this._push(recvId, uid, { ret: 0 });
+                if (bSyncOpen.newlyCompletedIds.length > 0) {
+                    this._push(1209, uid, { taskId: bSyncOpen.newlyCompletedIds, all: false });
+                }
+                if (bSyncOpen.changedTasks.length > 0) {
+                    this._push(1202, uid, { dataList: bSyncOpen.changedTasks });
+                }
                 this._push(405, uid, { buildingList: [st.buildings[bid]] });
                 this._pushEarnSpeed(st);
                 this._pushTaskUpdates(st);
@@ -1456,29 +1690,18 @@
                 var b = st.buildings[ubid];
                 if (b) {
                     b.level = Number(b.level || 1) + unum;
-                    // Unlock any business whose level condition is now met
-                    var dbU = getDBUtil();
-                    if (dbU && dbU.getStoreSetingListByBuildingId) {
-                        try {
-                            var sList = dbU.getStoreSetingListByBuildingId(ubid) || [];
-                            for (var j = 0; j < sList.length; j++) {
-                                if (sList[j].type === 1) {
-                                    var has = false;
-                                    for (var m = 0; m < b.businessList.length; m++) {
-                                        if (b.businessList[m].businessId === sList[j].id) has = true;
-                                    }
-                                    if (!has && b.level >= (j + 1) * 10) {
-                                        b.businessList.push({ businessId: sList[j].id, status: 0 });
-                                    }
-                                }
-                            }
-                        } catch (e) {}
-                    }
+                    var bSyncUp = syncAllBusinessTasks(st);
                     var cost = Math.min(Number(st.silver || 0), unum * b.level * 15);
                     st.silver = subBigNumStr(st.silver, cost);
                     recalcEarnSpeed(st);
                     saveState(st);
                     this._push(403, uid, { ret: 0 });
+                    if (bSyncUp.newlyCompletedIds.length > 0) {
+                        this._push(1209, uid, { taskId: bSyncUp.newlyCompletedIds, all: false });
+                    }
+                    if (bSyncUp.changedTasks.length > 0) {
+                        this._push(1202, uid, { dataList: bSyncUp.changedTasks });
+                    }
                     this._push(405, uid, { buildingList: [b] });
                     this._pushAttrs(st);
                     this._pushEarnSpeed(st);
@@ -1514,6 +1737,7 @@
                     this._push(406, uid, { ret: 0 });
                     this._push(405, uid, { buildingList: [dbB] });
                     this._pushEarnSpeed(st);
+                    this._pushTaskUpdates(st);
                 } else {
                     this._push(406, uid, { ret: 0 });
                 }
@@ -1563,13 +1787,30 @@
             }
             case 20424: { // S_BUILDING_HANDLE (serve customer / tap shop)
                 var hbid = Number(req.buildingId || 15101);
+                var hItemId = Number(req.itemId || 10101);
                 var hInc = Math.max(50, Number(st.earnSpeed || 50) * 2);
                 st.silver = addBigNumStr(st.silver, hInc);
+                st.buildingServeCounts = st.buildingServeCounts || {};
                 st.buildingServeCounts[hbid] = (st.buildingServeCounts[hbid] || 0) + 1;
+                st.buildingHandleDetails = st.buildingHandleDetails || {};
+                st.buildingHandleDetails[hbid] = st.buildingHandleDetails[hbid] || {};
+                st.buildingHandleDetails[hbid][hItemId] = (st.buildingHandleDetails[hbid][hItemId] || 0) + 1;
                 saveState(st);
                 this._push(424, uid, { ret: 0, buildingId: hbid, income: String(hInc) });
                 this._pushAttrs(st);
                 this._pushTaskUpdates(st);
+                return;
+            }
+            case 20428: { // S_BUILDING_HANDLE_DETAIL
+                var hdbid = Number(req.buildingId || 15101);
+                var detMap = (st.buildingHandleDetails && st.buildingHandleDetails[hdbid]) ? st.buildingHandleDetails[hdbid] : {};
+                var detList = [];
+                for (var ik in detMap) {
+                    if (detMap.hasOwnProperty(ik)) {
+                        detList.push({ itemId: Number(ik), num: Number(detMap[ik]) });
+                    }
+                }
+                this._push(428, uid, { details: detList });
                 return;
             }
             case 20434: { // S_BUILDING_AUTO_SWITCH
@@ -1582,6 +1823,64 @@
                 } else {
                     this._push(434, uid, { ret: 0 });
                 }
+                return;
+            }
+
+            // ---------------- WORKSHOP / FACTORY ----------------
+            case 25611: { // S_WORKSHOP_INFO
+                migrateState(st);
+                this._push(5611, uid, { ret: 0, workshopData: st.workshop });
+                this._push(5601, uid, { workshopData: st.workshop });
+                return;
+            }
+            case 25602: { // S_WORKSHOP_UPGRADE
+                migrateState(st);
+                var ws = st.workshop;
+                ws.sectionProgress = Number(ws.sectionProgress || 1) + 1;
+                if (ws.sectionProgress > 100) {
+                    ws.workshopId = Number(ws.workshopId || 1) + 1;
+                    ws.maxWorkshopId = Math.max(Number(ws.maxWorkshopId || 1), ws.workshopId);
+                    ws.sectionProgress = 1;
+                }
+                var wsExp = 200;
+                var wsPrestige = 20;
+                grantItem(st, 101000, 1000);
+                grantItem(st, 101002, wsPrestige);
+                grantItem(st, 101003, wsExp);
+                saveState(st);
+                this._push(5602, uid, {
+                    ret: 0,
+                    workshopData: ws,
+                    reward: "101000=1000;101002=" + wsPrestige,
+                    experience: wsExp,
+                    prestige: wsPrestige
+                });
+                this._push(5601, uid, { workshopData: ws });
+                this._pushAttrs(st);
+                this._pushTaskUpdates(st);
+                return;
+            }
+            case 25603: { // S_WORKSHOP_BUY_BUFF
+                migrateState(st);
+                st.workshop.buyBuffTimes = Number(st.workshop.buyBuffTimes || 0) + Math.max(1, Number(req.buyTimes || 1));
+                saveState(st);
+                this._push(5603, uid, { ret: 0, workshopData: st.workshop });
+                this._push(5601, uid, { workshopData: st.workshop });
+                return;
+            }
+            case 25604: // S_WORKSHOP_EVENT
+            case 25605: // S_WORKSHOP_ONE_KEY_DEAL
+            case 25606: { // S_WORKSHOP_BOSS_BATTLE
+                migrateState(st);
+                st.workshop.events = [];
+                st.workshop.isBoss = 0;
+                grantItem(st, 101000, 5000);
+                grantItem(st, 101002, 50);
+                saveState(st);
+                this._push(recvId, uid, { ret: 0, workshopData: st.workshop, reward: "101000=5000;101002=50" });
+                this._push(5601, uid, { workshopData: st.workshop });
+                this._pushAttrs(st);
+                this._pushTaskUpdates(st);
                 return;
             }
 
@@ -1653,10 +1952,12 @@
                         newLv = 1 + skNum;
                         skHero.skillList.push({ skillId: skId, skillLv: newLv, type: skType });
                     }
+                    st.heroSkillUpgradeCount = Number(st.heroSkillUpgradeCount || 0) + skNum;
                     recalcEarnSpeed(st);
                     saveState(st);
                     this._push(505, uid, { ret: 0, patronsId: skHid, skillId: skId, skillLv: newLv, type: skType });
                     this._push(502, uid, { patronsList: [skHero] });
+                    this._pushTaskUpdates(st);
                 } else {
                     this._push(505, uid, { ret: 0, patronsId: skHid, skillId: skId, skillLv: newLv, type: skType });
                 }
@@ -1747,38 +2048,74 @@
                 if (task) {
                     task.state = 1; // received
                     task.finishTime = Math.floor(now / 1000);
+                } else {
+                    task = { taskId: tid, value: "1", state: 1, finishTime: Math.floor(now / 1000), taskStartTime: 0, taskEndTime: 0 };
+                    st.tasks[tid] = task;
                 }
                 if (st.completeTaskIds.indexOf(tid) < 0) {
                     st.completeTaskIds.push(tid);
                 }
-                if (cfgT && cfgT.rewards) {
+
+                // If this is a type=22 business-unlock task, also attach businessId to the building
+                var updatedBuildings = [];
+                if (dbUtilT && dbUtilT.getStoreSetingListByBuildingId) {
+                    for (var bKey in st.buildings) {
+                        if (!st.buildings.hasOwnProperty(bKey)) continue;
+                        var bObj = st.buildings[bKey];
+                        var slT = [];
+                        try { slT = dbUtilT.getStoreSetingListByBuildingId(Number(bKey)) || []; } catch (e) {}
+                        for (var sIdx = 0; sIdx < slT.length; sIdx++) {
+                            if (Number(slT[sIdx].unlockCondition) === tid) {
+                                if (ensureBusinessInBuilding(bObj, slT[sIdx].id)) {
+                                    updatedBuildings.push(bObj);
+                                } else if (updatedBuildings.indexOf(bObj) < 0) {
+                                    updatedBuildings.push(bObj);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (cfgT && cfgT.rewards && cfgT.rewards !== "0") {
                     grantRewardString(st, cfgT.rewards);
-                } else {
+                } else if (!cfgT || Number(cfgT.type) !== 22) {
                     grantItem(st, 101000, 500);
                     grantItem(st, 101002, 5);
                 }
                 var nextId = cfgT && cfgT.nextTaskId ? Number(cfgT.nextTaskId) : 0;
                 var nextTaskObj = null;
                 if (nextId > 0) {
-                    st.mainTaskId = nextId;
+                    if (!cfgT || Number(cfgT.type) === 2) {
+                        st.mainTaskId = nextId;
+                    }
                     nextTaskObj = evaluateTaskProgress(st, nextId) || {
                         taskId: nextId, value: "0", state: 0, finishTime: 0, taskStartTime: 0, taskEndTime: 0
                     };
                     st.tasks[nextId] = nextTaskObj;
                 }
+                var extraChangedTasks = updateAllActiveTasks(st);
+                if (updatedBuildings.length > 0) recalcEarnSpeed(st);
                 st.taskActive = Number(st.taskActive || 0) + 10;
                 saveState(st);
+
                 var respTask = { ret: 0, finishTime: Math.floor(now / 1000) };
                 if (nextId > 0) {
                     respTask.nextTaskId = nextId;
                     respTask.nextTask = nextTaskObj;
                 }
                 this._push(1205, uid, respTask);
+                this._push(1209, uid, { taskId: [tid], all: false });
                 var syncList = [];
                 if (task) syncList.push(task);
                 if (nextTaskObj) syncList.push(nextTaskObj);
+                for (var ei = 0; ei < extraChangedTasks.length; ei++) {
+                    if (syncList.indexOf(extraChangedTasks[ei]) < 0) syncList.push(extraChangedTasks[ei]);
+                }
                 if (syncList.length > 0) this._push(1202, uid, { dataList: syncList });
-                this._push(1209, uid, { taskId: [tid], all: false });
+                if (updatedBuildings.length > 0) {
+                    this._push(405, uid, { buildingList: updatedBuildings });
+                    this._pushEarnSpeed(st);
+                }
                 this._push(1203, uid, { taskActive: st.taskActive, rewardIndexList: st.taskActiveRewards || [] });
                 this._pushAttrs(st);
                 this._pushBag(st);
