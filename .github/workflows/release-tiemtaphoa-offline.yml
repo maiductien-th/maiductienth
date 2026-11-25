@@ -30,18 +30,18 @@ jobs:
 
       - name: Merge, patch, align, sign, and verify offline APK
         run: |
-          python3 tiemtaphoa-offline/patch_apk.py GocChoXua_3.7.1.xapk GocChoXua-3.7.1-offline-fix2.apk
-          SHA256=$(sha256sum GocChoXua-3.7.1-offline-fix2.apk | awk '{print $1}')
+          python3 tiemtaphoa-offline/patch_apk.py GocChoXua_3.7.1.xapk GocChoXua-3.7.1-offline-fix3.apk
+          SHA256=$(sha256sum GocChoXua-3.7.1-offline-fix3.apk | awk '{print $1}')
           printf '\n- **SHA-256:** `%s`\n' "$SHA256" >> tiemtaphoa-offline/RELEASE_NOTES.md
-          ls -lh GocChoXua-3.7.1-offline-fix2.apk
+          ls -lh GocChoXua-3.7.1-offline-fix3.apk
 
-      - name: Publish GitHub Release tiemtaphoa-offline-v2
+      - name: Publish GitHub Release tiemtaphoa-offline-v3
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete tiemtaphoa-offline-v2 --yes 2>/dev/null || true
-          gh release create tiemtaphoa-offline-v2 \
+          gh release delete tiemtaphoa-offline-v3 --yes 2>/dev/null || true
+          gh release create tiemtaphoa-offline-v3 \
             --target "${{ github.ref_name }}" \
-            --title "Góc Chợ Xưa 3.7.1 Offline (Fix v2)" \
+            --title "Góc Chợ Xưa 3.7.1 Offline (Fix v3)" \
             --notes-file tiemtaphoa-offline/RELEASE_NOTES.md \
-            GocChoXua-3.7.1-offline-fix2.apk
+            GocChoXua-3.7.1-offline-fix3.apk

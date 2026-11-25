@@ -195,9 +195,18 @@ async function runTests() {
     }
     const completeSync = received.find((x) => x.recvMsgId === 1209);
     assert.ok(completeSync && completeSync.decoded.taskId.includes(2201101), "Starter business task 2201101 must be in completeTaskIds (1209)!");
-    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets (incl. 2201101 & Workshop 5601) ending with smInitDataEnd(103).");
+    const customerSync = received.find((x) => x.recvMsgId === 4601);
+    assert.ok(customerSync && customerSync.decoded.customerList.length === 57, "Expected 57 unlocked customers (108001..108057) in 4601, got " + (customerSync ? customerSync.decoded.customerList.length : 0));
+    assert.strictEqual(customerSync.decoded.customerList[0].customerId, 108001);
+    assert.strictEqual(customerSync.decoded.customerList[0].status, 2);
+    const taskSync = received.find((x) => x.recvMsgId === 1201);
+    const taskIds = taskSync ? taskSync.decoded.dataList.map((t) => t.taskId) : [];
+    assert.ok(taskIds.includes(2300001) && taskIds.includes(2300041), "Expected all 41 GuideBook tasks (2300001..2300041) in 1201");
+    const wsSync = received.find((x) => x.recvMsgId === 5601);
+    assert.ok(wsSync && wsSync.decoded.workshopData.workshopConfig && wsSync.decoded.workshopData.workshopConfig.id === 1, "Expected valid workshopConfig.id=1 in 5601");
+    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets (incl. 2201101, 57 customers, 41 GuideBook tasks & WorkshopConfig) ending with smInitDataEnd(103).");
 
-    console.log("3. Testing Core Gameplay Actions (Breakfast Stall, Tasks, Workshop, Heroes, Beauties)...");
+    console.log("3. Testing Core Gameplay Actions (Breakfast Stall, Tasks, Customers, Workshop, Heroes, Beauties)...");
     received.length = 0;
     sendC2S(20102, {}); // Ping
     sendC2S(20133, {}); // ConfigVersion
@@ -207,6 +216,8 @@ async function runTests() {
     sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #2
     sendC2S(20424, { buildingId: 15101, handleType: 1, itemId: 10101 }); // Serve customer #3
     sendC2S(20428, { buildingId: 15101, handleType: 1 }); // Handle detail
+    sendC2S(24603, { customerId: 108001 }); // S_CUSTOMER_UNLOCK
+    sendC2S(24604, { customerId: 108001 }); // S_CUSTOMER_UNLOCK_REWARD
     sendC2S(25602, { isBackend: false }); // Workshop upgrade
     sendC2S(25611, {}); // Workshop info
     sendC2S(20503, { patronsId: 102210, times: 5 }); // Upgrade Hero
@@ -222,7 +233,7 @@ async function runTests() {
     await wait(120);
 
     const actionIds = new Set(received.map((x) => x.recvMsgId));
-    for (const id of [102, 133, 403, 402, 424, 428, 5602, 5611, 503, 4303, 108, 1205, 1209, 304, 4852, 135, 5852, 9359]) {
+    for (const id of [102, 133, 403, 402, 424, 428, 4602, 4603, 4604, 5602, 5611, 503, 4303, 108, 1205, 1209, 304, 4852, 135, 5852, 9359]) {
         assert.ok(actionIds.has(id), "Missing response for recvMsgId: " + id);
     }
     const detailPkt = received.find((x) => x.recvMsgId === 428);
@@ -230,6 +241,7 @@ async function runTests() {
     const st = srv.getState("test_user");
     assert.strictEqual(st.buildings[15101].level, 20);
     assert.strictEqual(st.buildingServeCounts[15101], 3);
+    assert.strictEqual(st.customers[108001].status, 3);
     assert.ok(st.completeTaskIds.includes(2201101) && st.completeTaskIds.includes(2201102), "2201101 & 2201102 should be completed");
     assert.strictEqual(st.workshop.sectionProgress, 2);
     assert.ok(st.buildings[15102], "15102 should be unlocked");
@@ -240,7 +252,7 @@ async function runTests() {
 
     console.log("4. Testing Auto-Schema Fallback on unhandled C2S protocols...");
     received.length = 0;
-    const sampleUnhandled = [24400, 24001, 24003, 25902, 20440, 24210, 24603, 20605, 21011, 20210, 25502];
+    const sampleUnhandled = [24400, 24001, 24003, 25902, 20440, 24210, 20605, 21011, 20210, 25502];
     for (const cid of sampleUnhandled) {
         if (cmdList[cid] && cmdList[cid].cmMethod && cmdList[cid].smMethod) {
             const ReqC = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cid, true, true);
@@ -250,6 +262,94 @@ async function runTests() {
     await wait(100);
     assert.strictEqual(received.length, sampleUnhandled.length, "Expected all fallback responses");
     console.log("   Auto-Schema Fallback PASS! (" + received.length + "/" + sampleUnhandled.length + " decoded cleanly)");
+
+    console.log("5. Testing Fix v3 (.manifest HTTP + Runtime Patches for RemoteResMgr/UIMgr/BuildingBaseView)...");
+    const manifestRes = srv.handleHttpRequest("GET", "https://cdn-sg-vn.pogohopper.com/71001001/3.7.1.82/assetsRemote/common/remoteRes.manifest", "");
+    assert.strictEqual(manifestRes, "{}");
+
+    function MockRemoteResMgr() {
+        this.remoteResMap = new Map();
+        this.remoteCheckMap = new Map();
+        this.localResMap = new Map();
+        this.resMap = {};
+    }
+    MockRemoteResMgr.prototype.loadResManifest = function () { throw new Error("should be patched"); };
+    MockRemoteResMgr.prototype.loadRemoteRes = function () { throw new Error("should be patched"); };
+
+    function MockUIMgr() {
+        this._uuidList = ["u1"];
+        this._multiidList = [0];
+        this._showingViewList = [];
+        this._isLocked = true;
+        this._isLockedTime = false;
+        this._views = {
+            u1: {
+                uiGuideName: "VillageMainView",
+                cacheClassName: "VillageMainView",
+                isHiding: true,
+                openData: { type: 1, showType: 1 },
+                viewContainer: { visible: false },
+                showSelf() { throw new Error("simulated under-view showSelf crash"); }
+            }
+        };
+    }
+    MockUIMgr.prototype.getViewWith = function (u) { return this._views[u]; };
+    MockUIMgr.prototype.removeMode = function () {};
+    MockUIMgr.prototype.removeFromLayer = function () {};
+    MockUIMgr.prototype.showUnderView = function () {};
+
+    function MockBuildingBaseView() { this.buildingId = 15101; this.closed = false; }
+    MockBuildingBaseView.prototype.saveCommonCustomerDataList = function () { throw new Error("simulated save crash"); };
+    MockBuildingBaseView.prototype.doEnterStatus = function () { throw new Error("simulated enterStatus crash"); };
+    MockBuildingBaseView.prototype.leaveBuilding = function () { this.doEnterStatus(this.buildingId, 0); this.closeSelf(); };
+    MockBuildingBaseView.prototype.closeSelf = function () { this.closed = true; };
+
+    global.fgui = { GRoot: { inst: { touchable: false } } };
+    const MockGuideBookUtil = {
+        canGetGuideBookReward() { throw new TypeError("Cannot read property 'state' of undefined"); }
+    };
+    const mockModules = {
+        RemoteResMgr: { RemoteResMgr: MockRemoteResMgr },
+        PackagesConfig: { PackagesConfig: { REMOTE_PATH: "assetsRemote/" } },
+        I18nUtil: { I18nUtil: { isResValid: () => false } },
+        UIMgr: { UIMgr: MockUIMgr },
+        CoreTypeDefine: { ViewType: { Guide: 10, Loading: 11, Toast: 12, Top: 13, Edit: 14 }, ViewShowType: { Screen: 1 } },
+        BuildingBaseView: { BuildingBaseView: MockBuildingBaseView },
+        GuideBookUtil: { GuideBookUtil: MockGuideBookUtil }
+    };
+    global.__require = (name) => mockModules[name];
+
+    srv.installRuntimePatches();
+    assert.strictEqual(MockGuideBookUtil.canGetGuideBookReward(2300099, 10001), false, "GuideBookUtil.canGetGuideBookReward must never throw on missing task");
+
+    // Verify RemoteResMgr patch
+    const rrm = new MockRemoteResMgr();
+    let manifestOk = false;
+    rrm.loadResManifest(["common"], (ok) => { manifestOk = ok; });
+    assert.strictEqual(manifestOk, true);
+    assert.ok(rrm.remoteResMap.has("common"));
+    let remoteOk = null;
+    rrm.loadRemoteRes("assetsRemote/common/sound/bgm_common", ".mp3", (ok) => { remoteOk = ok; });
+    assert.strictEqual(remoteOk, false);
+    assert.strictEqual(await rrm.checkRemoteFileExist("x"), false);
+
+    // Verify UIMgr freeze-proof patch
+    const uiMgr = new MockUIMgr();
+    let removedFromParent = false;
+    uiMgr.removeFromLayer({
+        uiGuideName: "BuildingBreakfastMainView",
+        viewContainer: { removeFromParent() { removedFromParent = true; } }
+    });
+    assert.strictEqual(removedFromParent, true, "View must be removed from parent even when under-view throws!");
+    assert.strictEqual(uiMgr._views.u1.viewContainer.visible, true, "Under-view must be made visible!");
+    assert.strictEqual(global.fgui.GRoot.inst.touchable, true, "GRoot touchable must be restored!");
+
+    // Verify BuildingBaseView safe leave patch
+    const bbv = new MockBuildingBaseView();
+    bbv.saveCommonCustomerDataList(); // must not throw
+    bbv.leaveBuilding();
+    assert.strictEqual(bbv.closed, true, "leaveBuilding must always closeSelf even if doEnterStatus throws!");
+    console.log("   Fix v3 Runtime Patches PASS!");
 
     console.log("\nALL E2E TESTS PASSED 100%!");
 }

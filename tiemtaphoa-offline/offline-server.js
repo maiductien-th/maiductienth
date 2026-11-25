@@ -453,6 +453,7 @@
                     params: []
                 }
             ],
+            customers: createDefaultCustomers(),
             shopBought: {},
             usedCodes: {}
         };
@@ -576,12 +577,115 @@
         return { changedTasks: changedTasks, newlyCompletedIds: newlyCompletedIds, changedBuildings: changedBuildings };
     }
 
+    function createDefaultCustomers() {
+        var map = {};
+        for (var cid = 108001; cid <= 108057; cid++) {
+            map[cid] = { customerId: cid, status: 2 };
+        }
+        return map;
+    }
+
+    function buildCustomerList(st) {
+        var list = [];
+        if (!st || !st.customers) return list;
+        for (var cid in st.customers) {
+            if (st.customers.hasOwnProperty(cid)) {
+                var c = st.customers[cid];
+                list.push({
+                    customerId: Number(c.customerId || cid),
+                    status: Number(c.status !== undefined ? c.status : 2)
+                });
+            }
+        }
+        return list;
+    }
+
+    function buildWorkshopConfig(wid) {
+        wid = Number(wid || 1);
+        var dbUtil = getDBUtil();
+        if (dbUtil && typeof dbUtil.getWorkshop === "function") {
+            try {
+                var cfg = dbUtil.getWorkshop(wid, false);
+                if (cfg && cfg.id) {
+                    return {
+                        id: Number(cfg.id),
+                        num: Number(cfg.num || 1),
+                        chapter: Number(cfg.chapter || 1),
+                        section: Number(cfg.section || 1),
+                        workshopTemplate: Number(cfg.workshopTemplate || 1),
+                        bossAbility: Number(cfg.bossAbility || 100),
+                        bossExpReward: Number(cfg.bossExpReward || 100),
+                        bossPrestige: Number(cfg.bossPrestige || 10),
+                        completeReward: String(cfg.completeReward || "101000=1000"),
+                        baseInspireConsume: String(cfg.baseInspireConsume || "101000=100"),
+                        onhookExp: Number(cfg.onhookExp || 10),
+                        levelUnlock: String(cfg.levelUnlock || "0"),
+                        addition: Number(cfg.addition || 0),
+                        exAddition: Number(cfg.exAddition || 0),
+                        moneyList: String(cfg.moneyList || "100"),
+                        abilityList: String(cfg.abilityList || "100"),
+                        expReward: String(cfg.expReward || "100"),
+                        prestige: String(cfg.prestige || "10"),
+                        eventsId: String(cfg.eventsId || "0"),
+                        bossFigure: String(cfg.bossFigure || "0")
+                    };
+                }
+            } catch (e) {}
+        }
+        return {
+            id: wid,
+            num: 1,
+            chapter: 1,
+            section: 1,
+            workshopTemplate: 1,
+            bossAbility: 100,
+            bossExpReward: 100,
+            bossPrestige: 10,
+            completeReward: "101000=1000",
+            baseInspireConsume: "101000=100",
+            onhookExp: 10,
+            levelUnlock: "0",
+            addition: 0,
+            exAddition: 0,
+            moneyList: "100",
+            abilityList: "100",
+            expReward: "100",
+            prestige: "10",
+            eventsId: "0",
+            bossFigure: "0"
+        };
+    }
+
     function migrateState(st) {
         if (!st) return st;
         if (!st.completeTaskIds) st.completeTaskIds = [];
         if (!st.buildingHandleDetails) st.buildingHandleDetails = {};
         if (!st.buildingServeCounts) st.buildingServeCounts = { 15101: 0 };
         if (st.heroSkillUpgradeCount === undefined) st.heroSkillUpgradeCount = 0;
+        if (!st.customers || Object.keys(st.customers).length === 0) {
+            st.customers = createDefaultCustomers();
+        } else {
+            for (var cid = 108001; cid <= 108057; cid++) {
+                if (!st.customers[cid]) {
+                    st.customers[cid] = { customerId: cid, status: 2 };
+                }
+            }
+        }
+        if (!st.tasks) st.tasks = {};
+        // Ensure all 41 GuideBook tasks (2300001..2300041) exist so GuideBookUtil.canGetGuideBookReward
+        // never throws TypeError: Cannot read property 'state' of undefined during GameToolBarView.onShow()
+        for (var gTid = 2300001; gTid <= 2300041; gTid++) {
+            if (!st.tasks[gTid]) {
+                st.tasks[gTid] = {
+                    taskId: gTid,
+                    value: "0",
+                    state: 0,
+                    finishTime: 0,
+                    taskStartTime: 0,
+                    taskEndTime: 0
+                };
+            }
+        }
         if (!st.workshop) {
             st.workshop = {
                 workshopId: 1,
@@ -603,6 +707,9 @@
                 totalEarnAddValue: 0,
                 maxWorkshopId: 1
             };
+        }
+        if (!st.workshop.workshopConfig || Number(st.workshop.workshopConfig.id) !== Number(st.workshop.workshopId || 1)) {
+            st.workshop.workshopConfig = buildWorkshopConfig(st.workshop.workshopId || 1);
         }
         // Repair Breakfast Stall starter business (2201101 -> 10101) on older saves
         if (st.buildings && st.buildings[15101]) {
@@ -1098,6 +1205,10 @@
             return { result: 0, orderId: "offline_" + Date.now(), msg: "ok" };
         }
 
+        if (u.indexOf(".manifest") >= 0) {
+            return "{}";
+        }
+
         // Default offline OK for any telemetry/analytics/CDN check
         return { result: 0, code: 0, msg: "ok" };
     }
@@ -1216,7 +1327,11 @@
         };
 
         if (this._async) {
-            setTimeout(deliver, 15);
+            if (typeof Promise === "function") {
+                Promise.resolve().then(deliver);
+            } else {
+                setTimeout(deliver, 0);
+            }
         } else {
             deliver();
         }
@@ -1296,13 +1411,18 @@
         this._closed = false;
 
         log("WebSocket connecting ->", url);
-        setTimeout(function () {
+        var openFn = function () {
             if (self._closed) return;
             self.readyState = 1; // OPEN
             if (typeof self.onopen === "function") {
                 self.onopen({ type: "open" });
             }
-        }, 20);
+        };
+        if (typeof Promise === "function") {
+            Promise.resolve().then(openFn);
+        } else {
+            setTimeout(openFn, 10);
+        }
     }
 
     OfflineWebSocket.CONNECTING = 0;
@@ -1316,12 +1436,17 @@
             var buf = encodePacket(recvMsgId, userId, payloadObj);
             if (!buf) return;
             var self = this;
-            setTimeout(function () {
+            var deliverMsg = function () {
                 if (self._closed || self.readyState !== 1) return;
                 if (typeof self.onmessage === "function") {
                     self.onmessage({ data: buf });
                 }
-            }, 5);
+            };
+            if (typeof Promise === "function") {
+                Promise.resolve().then(deliverMsg);
+            } else {
+                setTimeout(deliverMsg, 0);
+            }
         } catch (e) {
             warn("_push failed for recvMsgId", recvMsgId, e && e.message);
         }
@@ -1433,6 +1558,7 @@
                 saveState(st);
 
                 // Always allow returning to Main Lobby from Breakfast Stall (btnClose visible from Task #1)
+                installRuntimePatches();
                 try {
                     var dbU = getDBUtil();
                     if (dbU && dbU.getConfigByParam) {
@@ -1485,8 +1611,8 @@
                 // 12. Cars (4201 & 4203)
                 this._push(4201, uid, { carList: objValues(st.cars) });
                 this._push(4203, uid, { templateIdList: [104001], gainedTemplateId: [104001], skin: [] });
-                // 13. Customers (4601)
-                this._push(4601, uid, { customerList: [] });
+                // 13. Customers (4601) — unlock all 57 NPC customers so they spawn in Breakfast Stall & all shops
+                this._push(4601, uid, { customerList: buildCustomerList(st) });
                 // 14. Bag (601)
                 this._pushBag(st);
                 // 15. Tasks (1201, 1203, 1204, 1209)
@@ -1841,6 +1967,7 @@
                     ws.workshopId = Number(ws.workshopId || 1) + 1;
                     ws.maxWorkshopId = Math.max(Number(ws.maxWorkshopId || 1), ws.workshopId);
                     ws.sectionProgress = 1;
+                    ws.workshopConfig = buildWorkshopConfig(ws.workshopId);
                 }
                 var wsExp = 200;
                 var wsPrestige = 20;
@@ -2249,6 +2376,47 @@
                 return;
             }
 
+            // ---------------- CUSTOMERS ----------------
+            case 24603: { // S_CUSTOMER_UNLOCK
+                var uCid = Number(req.customerId || 0);
+                if (uCid > 0) {
+                    st.customers = st.customers || createDefaultCustomers();
+                    st.customers[uCid] = { customerId: uCid, status: 2 };
+                    saveState(st);
+                    this._push(4603, uid, { ret: 0, customerId: uCid });
+                    this._push(4602, uid, { customerList: [st.customers[uCid]] });
+                } else {
+                    this._push(4603, uid, { ret: 0, customerId: uCid });
+                }
+                return;
+            }
+            case 24604: { // S_CUSTOMER_UNLOCK_REWARD
+                var rCid = Number(req.customerId || 0);
+                var cRew = "101001=50";
+                if (rCid > 0) {
+                    st.customers = st.customers || createDefaultCustomers();
+                    st.customers[rCid] = { customerId: rCid, status: 3 };
+                    var dbU3 = getDBUtil();
+                    if (dbU3 && dbU3.getCustomer) {
+                        try {
+                            var cCfg = dbU3.getCustomer(rCid);
+                            if (cCfg && cCfg.unlockReward && cCfg.unlockReward !== "0") {
+                                cRew = String(cCfg.unlockReward);
+                            }
+                        } catch (e) {}
+                    }
+                    grantRewardString(st, cRew);
+                    saveState(st);
+                    this._push(4604, uid, { ret: 0, customerId: rCid, reward: cRew });
+                    this._push(4602, uid, { customerList: [st.customers[rCid]] });
+                    this._pushAttrs(st);
+                    this._pushBag(st);
+                } else {
+                    this._push(4604, uid, { ret: 0, customerId: rCid, reward: "" });
+                }
+                return;
+            }
+
             // ---------------- GENERIC AUTO-SCHEMA FALLBACK ----------------
             default: {
                 var pbMgr = getProtobufMgr();
@@ -2262,6 +2430,273 @@
 
     global.WebSocket = OfflineWebSocket;
 
+    // =========================================================================
+    // 9. Runtime Engine Patches (Offline RemoteResMgr + Safe UI Transitions)
+    // =========================================================================
+    var runtimePatchState = {
+        remoteResPatched: false,
+        uiMgrPatched: false,
+        buildingBasePatched: false
+    };
+
+    function installRuntimePatches() {
+        // 9a. Patch RemoteResMgr so offline mode NEVER downloads from remote CDN or spams
+        //     "Tải tài nguyên từ xa thất bại, vui lòng kiểm tra mạng" (L_ShiGuang_Common_Text_0802/0803/0804)
+        if (!runtimePatchState.remoteResPatched) {
+            try {
+                var rrmMod = getModule("RemoteResMgr");
+                var RRM = rrmMod && rrmMod.RemoteResMgr ? rrmMod.RemoteResMgr : null;
+                if (RRM && RRM.prototype) {
+                    var i18nMod = getModule("I18nUtil");
+                    var I18nUtil = i18nMod && i18nMod.I18nUtil ? i18nMod.I18nUtil : null;
+                    var pkgCfgMod = getModule("PackagesConfig");
+                    var REMOTE_PREFIX = (pkgCfgMod && pkgCfgMod.PackagesConfig && pkgCfgMod.PackagesConfig.REMOTE_PATH)
+                        ? pkgCfgMod.PackagesConfig.REMOTE_PATH
+                        : "assetsRemote/";
+
+                    var stripRemote = function (u) {
+                        var s = String(u || "");
+                        return s.indexOf(REMOTE_PREFIX) === 0 ? s.substring(REMOTE_PREFIX.length) : s;
+                    };
+
+                    RRM.prototype.loadResManifest = function (pkgList, cb) {
+                        if (Array.isArray(pkgList)) {
+                            for (var i = 0; i < pkgList.length; i++) {
+                                var pkg = pkgList[i];
+                                if (!pkg) continue;
+                                if (this.remoteResMap && !this.remoteResMap.has(pkg)) this.remoteResMap.set(pkg, {});
+                                if (this.remoteCheckMap && !this.remoteCheckMap.has(pkg)) this.remoteCheckMap.set(pkg, {});
+                                if (this.localResMap && !this.localResMap.has(pkg)) this.localResMap.set(pkg, {});
+                            }
+                        }
+                        if (typeof cb === "function") cb(true);
+                    };
+
+                    RRM.prototype.checkRemoteFileExist = function () {
+                        return Promise.resolve(false);
+                    };
+
+                    RRM.prototype.downloadRemoteRes = function (url, type, cb) {
+                        if (typeof cb === "function") cb(false, null);
+                    };
+
+                    RRM.prototype.loadRemoteRes = function (url, type, cb, viewCache) {
+                        if (this.resMap && this.resMap[url] && this.resMap[url][type]) {
+                            var cached = this.resMap[url][type];
+                            try { if (cached.addRef) cached.addRef(); } catch (e) {}
+                            if (typeof cb === "function") cb(true, cached);
+                            return;
+                        }
+                        if (type === ".manifest") {
+                            if (typeof cb === "function") cb(true, { text: "{}" });
+                            return;
+                        }
+                        // Fallback: check if asset is actually bundled locally inside APK resources
+                        var localUrl = stripRemote(url);
+                        if (localUrl && I18nUtil && typeof I18nUtil.isResValid === "function" && I18nUtil.isResValid(localUrl)) {
+                            var selfRRM = this;
+                            var assetType = (type === ".png" || type === ".jpg")
+                                ? (global.cc && global.cc.Texture2D ? global.cc.Texture2D : null)
+                                : (type === ".mp3"
+                                    ? (global.cc && global.cc.AudioClip ? global.cc.AudioClip : null)
+                                    : (global.cc && global.cc.Asset ? global.cc.Asset : null));
+                            if (assetType && typeof I18nUtil.loadResWithType === "function") {
+                                I18nUtil.loadResWithType(localUrl, assetType, function (err, asset) {
+                                    if (!err && asset) {
+                                        selfRRM.resMap[url] = selfRRM.resMap[url] || {};
+                                        selfRRM.resMap[url][type] = asset;
+                                        try { if (asset.addRef) asset.addRef(); } catch (e) {}
+                                        if (typeof cb === "function") cb(true, asset);
+                                    } else {
+                                        if (typeof cb === "function") cb(false, null);
+                                    }
+                                });
+                                return;
+                            }
+                        }
+                        // Silently fail without invoking jsb.Downloader or showing network error tips
+                        if (typeof cb === "function") cb(false, null);
+                    };
+
+                    var loadOfflineSpine = function (url, cb) {
+                        var localUrl = stripRemote(url);
+                        if (localUrl && I18nUtil && typeof I18nUtil.isResValid === "function" && I18nUtil.isResValid(localUrl)
+                            && global.sp && global.sp.SkeletonData && typeof I18nUtil.loadResWithType === "function") {
+                            I18nUtil.loadResWithType(localUrl, global.sp.SkeletonData, function (err, skelData) {
+                                if (!err && skelData) {
+                                    if (typeof cb === "function") cb(null, skelData);
+                                } else {
+                                    if (typeof cb === "function") cb(err || new Error("offline spine load failed"), null);
+                                }
+                            });
+                            return;
+                        }
+                        if (typeof cb === "function") cb(new Error("offline remote spine unavailable: " + url), null);
+                    };
+                    RRM.prototype.loadRemoteSkelSpineResNoNode = loadOfflineSpine;
+                    RRM.prototype.loadRemoteJsonSpineResNoNode = loadOfflineSpine;
+
+                    runtimePatchState.remoteResPatched = true;
+                    log("Patched RemoteResMgr for pure offline mode (zero remote manifest/CDN errors)");
+                }
+            } catch (e) {
+                warn("Patch RemoteResMgr failed:", e && e.message);
+            }
+        }
+
+        // 9b. Patch UIMgr so closing Breakfast Stall (or any full-screen window) NEVER freezes
+        //     even if an underlying HUD/view throws during showUnderView()
+        if (!runtimePatchState.uiMgrPatched) {
+            try {
+                var uiMod = getModule("UIMgr");
+                var UIMgrCls = uiMod && uiMod.UIMgr ? uiMod.UIMgr : null;
+                if (UIMgrCls && UIMgrCls.prototype) {
+                    var origRemoveFromLayer = UIMgrCls.prototype.removeFromLayer;
+                    UIMgrCls.prototype.removeFromLayer = function (view) {
+                        if (view && view.viewContainer) {
+                            try {
+                                this.showUnderView();
+                            } catch (err) {
+                                warn("UIMgr.showUnderView error during removeFromLayer(" + (view.uiGuideName || "") + "):", err && (err.stack || err.message || err));
+                            }
+                            try {
+                                this.removeMode(view);
+                            } catch (err2) {
+                                warn("UIMgr.removeMode error:", err2 && err2.message);
+                            }
+                            try {
+                                view.viewContainer.removeFromParent();
+                            } catch (err3) {
+                                warn("UIMgr.removeFromParent error:", err3 && err3.message);
+                            }
+                            // Ensure root touchable is never stuck false after closing a full-screen window
+                            try {
+                                if (!this._isLockedTime && global.fgui && global.fgui.GRoot && global.fgui.GRoot.inst) {
+                                    this._isLocked = false;
+                                    global.fgui.GRoot.inst.touchable = true;
+                                }
+                            } catch (err4) {}
+                        }
+                    };
+
+                    var origShowUnderView = UIMgrCls.prototype.showUnderView;
+                    UIMgrCls.prototype.showUnderView = function () {
+                        var coreTypeMod = getModule("CoreTypeDefine");
+                        var VT = coreTypeMod && coreTypeMod.ViewType ? coreTypeMod.ViewType : null;
+                        var VST = coreTypeMod && coreTypeMod.ViewShowType ? coreTypeMod.ViewShowType : null;
+                        if (!VT || !VST) {
+                            return origShowUnderView.apply(this, arguments);
+                        }
+                        var skipTypes = [VT.Guide, VT.Loading, VT.Toast, VT.Top, VT.Edit];
+                        for (var e = this._uuidList.length - 1; e >= 0; e--) {
+                            var uuid = this._uuidList[e];
+                            var mid = this._multiidList[e];
+                            var v = this.getViewWith(uuid, mid);
+                            if (v && v.openData) {
+                                var r = v.openData.type;
+                                if (skipTypes.indexOf(r) === -1) {
+                                    if (!v.viewCloseSelfOnScreenOpen && !v.viewActivityLock && v.isHiding) {
+                                        try {
+                                            if (this._showingViewList && this._showingViewList.push) {
+                                                this._showingViewList.push(v.cacheClassName);
+                                            }
+                                            v.showSelf();
+                                        } catch (err) {
+                                            warn("showUnderView failed on " + (v.uiGuideName || v.cacheClassName) + ":", err && (err.stack || err.message || err));
+                                            try {
+                                                v.isHiding = false;
+                                                if (v.viewContainer) v.viewContainer.visible = true;
+                                            } catch (e2) {}
+                                        }
+                                    }
+                                    if (v.openData.showType == VST.Screen) break;
+                                }
+                            }
+                        }
+                    };
+
+                    runtimePatchState.uiMgrPatched = true;
+                    log("Patched UIMgr.removeFromLayer & showUnderView for freeze-proof view closing");
+                }
+            } catch (e) {
+                warn("Patch UIMgr failed:", e && e.message);
+            }
+        }
+
+        // 9c. Patch BuildingBaseView so leaving a shop never throws inside saveCommonCustomerDataList
+        //     or uninitView before closing the view
+        if (!runtimePatchState.buildingBasePatched) {
+            try {
+                var bbMod = getModule("BuildingBaseView");
+                var BBV = bbMod && bbMod.BuildingBaseView ? bbMod.BuildingBaseView : null;
+                if (BBV && BBV.prototype) {
+                    var origSaveCust = BBV.prototype.saveCommonCustomerDataList;
+                    if (typeof origSaveCust === "function") {
+                        BBV.prototype.saveCommonCustomerDataList = function () {
+                            try {
+                                return origSaveCust.apply(this, arguments);
+                            } catch (err) {
+                                warn("saveCommonCustomerDataList error ignored:", err && err.message);
+                            }
+                        };
+                    }
+                    var origLeave = BBV.prototype.leaveBuilding;
+                    if (typeof origLeave === "function") {
+                        BBV.prototype.leaveBuilding = function () {
+                            log("leaveBuilding buildingId=" + this.buildingId);
+                            try {
+                                this.doEnterStatus(this.buildingId, 0);
+                            } catch (err) {
+                                warn("leaveBuilding doEnterStatus error:", err && err.message);
+                            }
+                            return this.closeSelf();
+                        };
+                    }
+                    runtimePatchState.buildingBasePatched = true;
+                    log("Patched BuildingBaseView.leaveBuilding & saveCommonCustomerDataList");
+                }
+            } catch (e) {
+                warn("Patch BuildingBaseView failed:", e && e.message);
+            }
+        }
+
+        // 9d. Patch GuideBookUtil.canGetGuideBookReward so missing GuideBook tasks never crash GameToolBarView.onShow()
+        if (!runtimePatchState.guideBookPatched) {
+            try {
+                var gbMod = getModule("GuideBookUtil");
+                var GBU = gbMod && gbMod.GuideBookUtil ? gbMod.GuideBookUtil : null;
+                if (GBU && typeof GBU.canGetGuideBookReward === "function") {
+                    var origCanGetGB = GBU.canGetGuideBookReward;
+                    GBU.canGetGuideBookReward = function (taskId, bookId) {
+                        try {
+                            return !!origCanGetGB.call(this, taskId, bookId);
+                        } catch (err) {
+                            return false;
+                        }
+                    };
+                    runtimePatchState.guideBookPatched = true;
+                    log("Patched GuideBookUtil.canGetGuideBookReward with null-safe guard");
+                }
+            } catch (e) {
+                warn("Patch GuideBookUtil failed:", e && e.message);
+            }
+        }
+    }
+
+    // Install runtime patches as soon as Cocos script bundle finishes loading (before LoginUpdateView/LoginLoadingView!)
+    if (typeof global.jsb !== "undefined" || typeof global.__require === "function") {
+        var patchTimerId = setInterval(function () {
+            installRuntimePatches();
+            if (runtimePatchState.remoteResPatched && runtimePatchState.uiMgrPatched && runtimePatchState.buildingBasePatched && runtimePatchState.guideBookPatched) {
+                clearInterval(patchTimerId);
+                log("All runtime offline patches active.");
+            }
+        }, 250);
+        if (patchTimerId && typeof patchTimerId.unref === "function") {
+            patchTimerId.unref();
+        }
+    }
+
     // Export for Node.js E2E verification
     global.__GCXUA_OFFLINE_SERVER__ = {
         handleHttpRequest: handleHttpRequest,
@@ -2271,6 +2706,7 @@
         getState: getState,
         saveState: saveState,
         toRecvProtocol: toRecvProtocol,
+        installRuntimePatches: installRuntimePatches,
         OfflineXMLHttpRequest: OfflineXMLHttpRequest,
         OfflineWebSocket: OfflineWebSocket
     };
