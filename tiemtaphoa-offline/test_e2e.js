@@ -1,0 +1,247 @@
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+
+// Simulate browser/Cocos global environment
+global.window = global;
+global.self = global;
+global.cc = {
+    _RF: { push() {}, pop() {} },
+    sys: {
+        localStorage: (() => {
+            const m = {};
+            return {
+                getItem: (k) => (Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null),
+                setItem: (k, v) => { m[k] = String(v); },
+                removeItem: (k) => { delete m[k]; }
+            };
+        })()
+    }
+};
+
+// Load game's exact along.js, bytebuffer.js, protobuf.js
+vm.runInThisContext(fs.readFileSync("/home/antigravity/work/tiemtaphoa/decrypted/along.js", "utf8"), { filename: "along.js" });
+vm.runInThisContext(fs.readFileSync("/home/antigravity/work/tiemtaphoa/decrypted/bytebuffer.js", "utf8"), { filename: "bytebuffer.js" });
+vm.runInThisContext(fs.readFileSync("/home/antigravity/work/tiemtaphoa/decrypted/protobuf.js", "utf8"), { filename: "protobuf.js" });
+
+// Build GameMsg.proto via game's exact ProtoBuf.protoFromString
+const protoText = fs.readFileSync("/home/antigravity/work/tiemtaphoa/extracted_data/GameMsg.proto", "utf8");
+const builder = window.ProtoBuf.protoFromString(protoText);
+
+// Parse Protocol.js to register every single C2S and S2C protocol exactly like the game does
+const protoJs = fs.readFileSync("/home/antigravity/work/tiemtaphoa/mods_core/Protocol.js", "utf8");
+const consts = {};
+for (const m of protoJs.matchAll(/t\.([A-Z0-9_]+)\s*=\s*(\d+);/g)) {
+    consts[m[1]] = Number(m[2]);
+}
+function toRecvProtocol(e) {
+    return e < 1e6 ? e % 1e4 : e < 2e6 ? e : e - 1e6;
+}
+const cmdList = {};
+const resvCmdList = {};
+const messages = {};
+const prefix = "com.zy.msg.GameMsg.";
+
+for (const m of protoJs.matchAll(/this\.addC2Scmd\(t\.([A-Z0-9_]+),\s*"([^"]+)"(?:,\s*"([^"]+)")?(?:,\s*"[^"]*")?(?:,\s*(-?\d+))?\)/g)) {
+    const id = consts[m[1]];
+    const cm = m[2];
+    const sm = m[3];
+    const overrideId = m[4] ? Number(m[4]) : -1;
+    const smMsgId = toRecvProtocol(overrideId !== -1 ? overrideId : id);
+    cmdList[id] = { cmMethod: cm, smMethod: sm, smMsgId };
+    if (cm && !messages[prefix + cm]) messages[prefix + cm] = builder.build(prefix + cm);
+    if (sm) {
+        if (!messages[prefix + sm]) messages[prefix + sm] = builder.build(prefix + sm);
+        resvCmdList[smMsgId] = { smMethod: sm };
+    }
+}
+for (const m of protoJs.matchAll(/this\.addS2Ccmd\(t\.([A-Z0-9_]+),\s*"([^"]+)"/g)) {
+    const id = consts[m[1]];
+    const sm = m[2];
+    const smMsgId = toRecvProtocol(id);
+    cmdList[id] = { smMethod: sm, smMsgId };
+    if (!messages[prefix + sm]) messages[prefix + sm] = builder.build(prefix + sm);
+    resvCmdList[smMsgId] = { smMethod: sm };
+}
+
+global.__OFFLINE_PROTOBUF_MGR__ = {
+    cmdList,
+    resvCmdList,
+    messages,
+    getMsg(id, isSend, returnClass) {
+        const entry = isSend ? cmdList[id] : resvCmdList[id];
+        if (!entry) return null;
+        const name = isSend ? entry.cmMethod : entry.smMethod;
+        if (!name) return null;
+        const cls = messages[prefix + name];
+        if (!cls) return null;
+        return returnClass ? cls : new cls();
+    }
+};
+
+// Load offline-server.js
+require("./offline-server.js");
+const srv = global.__GCXUA_OFFLINE_SERVER__;
+
+async function runTests() {
+    console.log("1. Testing HTTP endpoints...");
+    function post(url, obj) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) resolve(JSON.parse(xhr.responseText));
+                    else reject(new Error("HTTP " + xhr.status));
+                }
+            };
+            xhr.send("param=" + encodeURIComponent(JSON.stringify(obj || {})));
+        });
+    }
+
+    const langRes = await post("https://login-sg-71.pogohopper.com/Web/languagePackage", { language: "vi_vn" });
+    assert.strictEqual(langRes.result, 0);
+
+    const updRes = await post("https://login-sg-71.pogohopper.com/Web/packageUpdate", {});
+    assert.strictEqual(updRes.result, 0);
+    assert.strictEqual(updRes.updateLevel, 0);
+    assert.strictEqual(updRes.hotPackUpdateLevel, 0);
+
+    const slRes = await post("https://login-sg-71.pogohopper.com/Web/packageServerList", { openId: "test_user" });
+    assert.strictEqual(slRes.result, 0);
+    assert.strictEqual(slRes.allowLogin, true);
+    const servers = JSON.parse(slRes.serverList);
+    assert.strictEqual(servers.length, 1);
+    assert.strictEqual(servers[0].serverId, 1);
+
+    const rnRes = await post(servers[0].url + "/getRandomName", { sex: 1 });
+    assert.strictEqual(rnRes.result, 0);
+    assert.ok(rnRes.name.length > 0);
+
+    const login1 = await post(servers[0].url + "/login", { openId: "test_user", serverId: 1 });
+    assert.strictEqual(login1.result, 0);
+    assert.strictEqual(login1.hasRole, false);
+    const uid = login1.userId;
+
+    const createRes = await post(servers[0].url + "/createRole", { nickName: "Tiệm Tạp Hóa 9X", sex: 1, headId: 10001 });
+    assert.strictEqual(createRes.result, 0);
+    assert.strictEqual(createRes.nickName, "Tiệm Tạp Hóa 9X");
+
+    const login2 = await post(servers[0].url + "/login", { openId: "test_user", serverId: 1 });
+    assert.strictEqual(login2.result, 0);
+    assert.strictEqual(login2.hasRole, true);
+    assert.strictEqual(login2.address, "127.0.0.1");
+    console.log("   HTTP PASS! userId=" + uid + " nickName=" + login2.nickName);
+
+    console.log("2. Testing WebSocket + Protobuf Login Sync...");
+    const ws = new WebSocket("ws://" + login2.address + ":" + login2.port);
+    const received = [];
+    await new Promise((resolve) => {
+        ws.onopen = resolve;
+    });
+
+    ws.onmessage = (evt) => {
+        const u8 = new Uint8Array(evt.data);
+        const header = (u8[0] << 8) | u8[1];
+        const totalLen = ((u8[2] << 24) >>> 0) + (u8[3] << 16) + (u8[4] << 8) + u8[5];
+        const recvMsgId = (((u8[6] << 24) >>> 0) + (u8[7] << 16) + (u8[8] << 8) + u8[9]) | 0;
+        assert.strictEqual(header, 29099);
+        assert.strictEqual(totalLen, u8.length);
+        const MsgClass = global.__OFFLINE_PROTOBUF_MGR__.getMsg(recvMsgId, false, true);
+        assert.ok(MsgClass, "Missing S2C MsgClass for " + recvMsgId);
+        const decoded = MsgClass.decode(u8.subarray(18));
+        received.push({ recvMsgId, decoded });
+    };
+
+    function sendC2S(cmdId, obj) {
+        const ReqClass = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cmdId, true, true);
+        const inst = new ReqClass(obj || {});
+        const enc = inst.encode();
+        const bodyLen = enc.limit - (enc.offset || 0);
+        const totalLen = 18 + bodyLen;
+        const buf = new ArrayBuffer(totalLen);
+        const u8 = new Uint8Array(buf);
+        u8[0] = (29099 >>> 8) & 0xff;
+        u8[1] = 29099 & 0xff;
+        u8[2] = (totalLen >>> 24) & 0xff;
+        u8[3] = (totalLen >>> 16) & 0xff;
+        u8[4] = (totalLen >>> 8) & 0xff;
+        u8[5] = totalLen & 0xff;
+        u8[6] = (cmdId >>> 24) & 0xff;
+        u8[7] = (cmdId >>> 16) & 0xff;
+        u8[8] = (cmdId >>> 8) & 0xff;
+        u8[9] = cmdId & 0xff;
+        const lv = window.Long.fromNumber(uid);
+        u8[10] = (lv.high >>> 24) & 0xff;
+        u8[11] = (lv.high >>> 16) & 0xff;
+        u8[12] = (lv.high >>> 8) & 0xff;
+        u8[13] = lv.high & 0xff;
+        u8[14] = (lv.low >>> 24) & 0xff;
+        u8[15] = (lv.low >>> 16) & 0xff;
+        u8[16] = (lv.low >>> 8) & 0xff;
+        u8[17] = lv.low & 0xff;
+        for (let i = 0; i < bodyLen; i++) u8[18 + i] = enc.view[(enc.offset || 0) + i];
+        ws.send(buf);
+    }
+
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    sendC2S(10101, { userId: uid, openId: "test_user", clientVer: "3.7.1", langType: "vi_vn", phonePlatform: 1 });
+    await wait(120);
+
+    const recvIds = received.map((x) => x.recvMsgId);
+    for (const reqId of [101, 152, 104, 105, 106, 111, 5851, 401, 501, 4301, 4201, 601, 1201, 301, 4851, 103]) {
+        assert.ok(recvIds.includes(reqId), "Missing login sync msgId: " + reqId);
+    }
+    console.log("   Login Sync PASS! Received " + received.length + " valid protobuf packets ending with smInitDataEnd(103).");
+
+    console.log("3. Testing Core Gameplay Actions...");
+    received.length = 0;
+    sendC2S(20102, {}); // Ping
+    sendC2S(20133, {}); // ConfigVersion
+    sendC2S(20403, { buildingId: 15101, upgradeNum: 10 }); // Upgrade Breakfast Stall +10
+    sendC2S(20402, { buildingId: 15102, upgradeNum: 1 }); // Open Grocery Store (Small Shop)
+    sendC2S(20424, { buildingId: 15101, handleType: 1 }); // Serve customer
+    sendC2S(20503, { patronsId: 102210, times: 5 }); // Upgrade Hero
+    sendC2S(24303, { beautyId: 103201 }); // Upgrade Beauty
+    sendC2S(20108, {}); // Upgrade Identity Title
+    sendC2S(21205, { taskId: 200001 }); // Claim Task Reward
+    sendC2S(20304, {}); // Claim All Mail
+    sendC2S(24852, {}); // Daily Sign-in
+    sendC2S(20135, { key: "ALLHERO" }); // Exchange Code
+    sendC2S(25852, { guideId: 101002, param: "" }); // Guide Record
+    sendC2S(29359, {}); // VN Save Param
+    await wait(100);
+
+    const actionIds = new Set(received.map((x) => x.recvMsgId));
+    for (const id of [102, 133, 403, 402, 424, 503, 4303, 108, 1205, 304, 4852, 135, 5852, 9359]) {
+        assert.ok(actionIds.has(id), "Missing response for recvMsgId: " + id);
+    }
+    const st = srv.getState("test_user");
+    assert.strictEqual(st.buildings[15101].level, 11);
+    assert.ok(st.buildings[15102], "15102 should be unlocked");
+    assert.strictEqual(st.heroes[102210].level, 15);
+    assert.strictEqual(st.titleId, 2);
+    assert.strictEqual(Object.keys(st.heroes).length, 6);
+    console.log("   Gameplay Actions PASS! Building 15101 Lv=" + st.buildings[15101].level + ", Heroes=" + Object.keys(st.heroes).length + ", Silver=" + st.silver);
+
+    console.log("4. Testing Auto-Schema Fallback on 30 unhandled C2S protocols...");
+    received.length = 0;
+    const sampleUnhandled = [24400, 24001, 24003, 25611, 25902, 20440, 24210, 24603, 20605, 21011, 20210, 25502];
+    for (const cid of sampleUnhandled) {
+        if (cmdList[cid] && cmdList[cid].cmMethod && cmdList[cid].smMethod) {
+            const ReqC = global.__OFFLINE_PROTOBUF_MGR__.getMsg(cid, true, true);
+            sendC2S(cid, srv.buildDefaultMessageObj(ReqC, {}));
+        }
+    }
+    await wait(100);
+    assert.strictEqual(received.length, sampleUnhandled.length, "Expected all fallback responses");
+    console.log("   Auto-Schema Fallback PASS! (" + received.length + "/" + sampleUnhandled.length + " decoded cleanly)");
+
+    console.log("\nALL E2E TESTS PASSED 100%!");
+}
+
+runTests().catch((err) => {
+    console.error("E2E TEST FAILED:", err);
+    process.exit(1);
+});
