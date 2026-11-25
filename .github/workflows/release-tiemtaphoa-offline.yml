@@ -1,0 +1,47 @@
+name: Build and Release GocChoXua Offline (tiemtaphoa)
+
+on:
+  push:
+    branches:
+      - tiemtaphoa-offline
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android packaging and smali tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apksigner zipalign dexdump libsmali-java zip unzip default-jdk-headless
+
+      - name: Download original tiemtaphoa XAPK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download tiemtaphoa --pattern "GocChoXua_3.7.1.xapk" --dir .
+          ls -lh GocChoXua_3.7.1.xapk
+
+      - name: Merge, patch, align, sign, and verify offline APK
+        run: |
+          python3 tiemtaphoa-offline/patch_apk.py GocChoXua_3.7.1.xapk GocChoXua-3.7.1-offline-fix4.apk
+          SHA256=$(sha256sum GocChoXua-3.7.1-offline-fix4.apk | awk '{print $1}')
+          printf '\n- **SHA-256:** `%s`\n' "$SHA256" >> tiemtaphoa-offline/RELEASE_NOTES.md
+          ls -lh GocChoXua-3.7.1-offline-fix4.apk
+
+      - name: Publish GitHub Release tiemtaphoa-offline-v4
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete tiemtaphoa-offline-v4 --yes 2>/dev/null || true
+          gh release create tiemtaphoa-offline-v4 \
+            --target "${{ github.ref_name }}" \
+            --title "Góc Chợ Xưa 3.7.1 Offline (Fix v4 — Full 13 Bugs Fixed + Max Tester Lv60 VIP15)" \
+            --notes-file tiemtaphoa-offline/RELEASE_NOTES.md \
+            GocChoXua-3.7.1-offline-fix4.apk
